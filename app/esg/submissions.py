@@ -102,6 +102,8 @@ def run_esg_analysis(sub_id: ObjectId) -> None:
     company_id = store.insert_user(
         sub["name"], sub["email"], sub["company_name"], sub["mobile_number"], [sub["original_filename"]]
     )
+    if not company_id:
+        raise RuntimeError("User insertion failed.")
 
     result = calculate_esg_score_concurrent([(sub["original_filename"], data)], company_id, sub["report_year"])
     if "error" in result or result.get("status") == "error":

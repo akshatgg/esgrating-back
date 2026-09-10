@@ -181,7 +181,7 @@ def legacy_get_report(id: str, admin: str = Depends(require_admin)):
     oid = _oid(id)
     report = store.report_hash().find_one({"_id": oid})
     if not report:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Report not found")
     return {"status": "success", "response": serialize_doc(report)}
 
 
@@ -234,7 +234,7 @@ def legacy_update_report(id: str, payload: ReportUpdateRequest, admin: str = Dep
     }
     result = store.report_hash().update_one({"_id": oid}, update_payload)
     if result.matched_count == 0:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "No report found with the provided ID.")
     return {"message": f"Report with ID {id} updated successfully."}
 
 

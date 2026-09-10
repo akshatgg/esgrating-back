@@ -8,6 +8,7 @@ from app.core import jobs
 from app.core.config import settings
 from app.core.uploads import save_upload
 from app.esg import llm as llm_mod
+from app.esg import store as esg_store
 from tests.conftest import FakeLLM
 from tests.fixtures.make_pdf import make_pdf
 
@@ -356,3 +357,61 @@ def test_legacy_get_and_update_report(admin_client, db):
     updated = db.esg_hashes.find_one({"_id": report_id})
     assert updated["llm_response"]["sector"] == "finance"
     assert updated["llm_response"]["composite_score"] == 81.0
+
+
+def test_legacy_get_report_malformed_id_is_not_found(admin_client):
+    resp = admin_client.get("/api/admin/esg/reports/not-an-object-id")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
+
+
+def test_legacy_get_report_valid_id_missing_document(admin_client, db):
+    resp = admin_client.get(f"/api/admin/esg/reports/{ObjectId()}")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Report not found"
+
+
+def test_legacy_update_report_malformed_id_is_not_found(admin_client):
+    payload = {
+        "environmental_keywords": [], "social_keywords": [], "governance_keywords": [],
+        "environmental_score": 1.0, "social_score": 1.0, "governance_score": 1.0, "composite_score": 1.0,
+        "sector": "x", "industry": "y", "report_date": "2026-01-01",
+        "environmental_score_performance": "A", "social_score_performance": "A",
+        "governance_score_performance": "A", "composite_score_performance": "A",
+        "environmental_score_performance_label": "Outstanding", "social_score_performance_label": "Outstanding",
+        "governance_score_performance_label": "Outstanding", "composite_score_performance_label": "Outstanding",
+    }
+    resp = admin_client.post("/api/admin/esg/reports/not-an-object-id", json=payload)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
+
+
+def test_legacy_update_report_valid_id_missing_document(admin_client, db):
+    payload = {
+        "environmental_keywords": [], "social_keywords": [], "governance_keywords": [],
+        "environmental_score": 1.0, "social_score": 1.0, "governance_score": 1.0, "composite_score": 1.0,
+        "sector": "x", "industry": "y", "report_date": "2026-01-01",
+        "environmental_score_performance": "A", "social_score_performance": "A",
+        "governance_score_performance": "A", "composite_score_performance": "A",
+        "environmental_score_performance_label": "Outstanding", "social_score_performance_label": "Outstanding",
+        "governance_score_performance_label": "Outstanding", "composite_score_performance_label": "Outstanding",
+    }
+    resp = admin_client.post(f"/api/admin/esg/reports/{ObjectId()}", json=payload)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "No report found with the provided ID."
+
+
+# --- admin: run_esg_analysis guards against a failed user insert ----------------------
+
+def test_analyze_fails_when_user_insertion_fails(admin_client, db, prompts, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    monkeypatch.setattr(esg_store, "insert_user", lambda *a, **k: None)
+
+    sub_id = _seed_submission(db)
+    resp = admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze")
+    assert resp.status_code == 202
+    assert resp.json() == {"started": True}
+
+    doc = db.esg_submissions.find_one({"_id": sub_id})
+    assert doc["analysis_status"] == "failed"
+    assert doc["analysis_error"] == "User insertion failed."
