@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth.router import router as auth_router
+from app.bfsi.router_admin import router as bfsi_admin_router
+from app.bfsi.router_public import router as bfsi_public_router
+from app.bfsi.store import ensure_indexes as ensure_bfsi_indexes
 from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
@@ -20,6 +23,10 @@ async def lifespan(_app: FastAPI):
         reset_interrupted_jobs()
     except Exception as e:
         logging.getLogger(__name__).warning("could not reset interrupted jobs: %s", e)
+    try:
+        ensure_bfsi_indexes()
+    except Exception as e:
+        logging.getLogger(__name__).warning("could not ensure bfsi indexes: %s", e)
     yield
 
 
@@ -36,6 +43,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(esg_public_router)
 app.include_router(esg_admin_router)
+app.include_router(bfsi_public_router)
+app.include_router(bfsi_admin_router)
 
 
 @app.exception_handler(UserError)

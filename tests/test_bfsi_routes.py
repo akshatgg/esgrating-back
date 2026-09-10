@@ -1,0 +1,557 @@
+import io
+from datetime import datetime, timezone
+
+import pytest
+from bson import ObjectId
+
+from app.bfsi import pipeline, store
+from app.bfsi.options import options_payload
+from app.core import jobs
+from app.core.config import settings
+from app.core.uploads import save_upload, upload_path
+from tests.fixtures.make_pdf import make_pdf
+
+VALID_FORM = {
+    "borrower_name": "Acme Pvt Ltd",
+    "cin_gstin": "U12345MH2015PLC123456",  # 21 chars
+    "contact_email": "borrower@example.com",
+    "industry": "manufacturing",
+    "sub_sector": "Textiles",
+    "loan_amount": "1000000",
+    "loan_purpose": "Working Capital",
+    "loan_type": "Term Loan",
+    "outstanding_loans": "50000",
+}
+
+
+def _pdf_file(data: bytes | None = None, name: str = "report.pdf"):
+    return {"report_file": (name, data or make_pdf(["hello world"]), "application/pdf")}
+
+
+def _seed_submission(db, **overrides):
+    stored_name, sha = save_upload("bfsi", make_pdf(["seed text"]), "pdf")
+    doc = {
+        "borrower_name": "Acme Pvt Ltd",
+        "cin_gstin": "U12345MH2015PLC123456",
+        "contact_email": "borrower@example.com",
+        "industry": "manufacturing",
+        "sub_sector": "Textiles",
+        "loan_amount": 1000000.0,
+        "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan",
+        "outstanding_loans": 50000.0,
+        "answers": [],
+        "file_path": stored_name,
+        "file_sha256": sha,
+        "submit_ip": "1.2.3.4",
+        "status": "new",
+        "created_at": datetime.now(timezone.utc),
+    }
+    doc.update(overrides)
+    return db.bfsi_submissions.insert_one(doc).inserted_id
+
+
+class FakeBfsiClient:
+    """Stand-in for OpenAiJson: scores by adjective found in the prompt text."""
+
+    def __init__(self, scores=None):
+        self.scores = scores or {"environmental": 70.0, "social": 60.0, "governance": 50.0}
+        self.batch_calls = 0
+        self.json_calls = 0
+
+    def batch(self, prompts, concurrency=8):
+        self.batch_calls += 1
+        out = {}
+        for k, p in prompts.items():
+            out[k] = None
+            for adj, score in self.scores.items():
+                if f"for {adj} performance" in p:
+                    out[k] = {
+                        "reason": "why", "score": score,
+                        "positive_keywords": ["k1", "k2"], "negative_keywords": ["n1"],
+                        "sector": "finance", "industry": "banking",
+                    }
+                    break
+        return out
+
+    def json(self, user, system=""):
+        self.json_calls += 1
+        if "STRICTLY SELECT THE TOP 5 KEYWORDS" in user:
+            return {"keywords": ["k1", "k2", "k3", "k4", "k5"]}
+        return {
+            "top_risks": ["r1"], "top_improvements": ["i1"],
+            "climate_risk": "warm", "governance_summary": "ok",
+            "key_metrics": {"employees": "10"},
+        }
+
+
+@pytest.fixture
+def fake_bfsi(monkeypatch):
+    c = FakeBfsiClient()
+    monkeypatch.setattr(pipeline, "get_client", lambda: c)
+    return c
+
+
+# --- options ---------------------------------------------------------------------------
+
+def test_options_matches_payload(client):
+    resp = client.get("/api/bfsi/options")
+    assert resp.status_code == 200
+    assert resp.json() == options_payload()
+
+
+# --- public submit: field validation, in order ------------------------------------------
+
+@pytest.mark.parametrize("overrides,message", [
+    ({"borrower_name": ""}, "Borrower name is required."),
+    ({"borrower_name": "x" * 256}, "Borrower name is required."),
+    ({"cin_gstin": "TOO-SHORT"}, "CIN must be 21 characters or GSTIN 15 characters."),
+    ({"contact_email": "not-an-email"}, "A valid contact email is required."),
+    ({"industry": "not-a-key"}, "Invalid industry."),
+    ({"sub_sector": "Not A Sub Sector"}, "Invalid sub-sector."),
+    ({"sub_sector": ""}, "Invalid sub-sector."),
+    ({"loan_amount": "0"}, "Loan amount must be positive."),
+    ({"loan_amount": "abc"}, "Loan amount must be positive."),
+    ({"loan_purpose": "Not A Purpose"}, "Invalid loan purpose."),
+    ({"loan_type": "Not A Type"}, "Invalid loan type."),
+    ({"outstanding_loans": "-1"}, "Outstanding loans must be 0 or more."),
+])
+def test_public_submit_field_validation_messages(client, overrides, message):
+    form = {**VALID_FORM, **overrides}
+    resp = client.post("/api/bfsi/submissions", data=form, files=_pdf_file())
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == message
+
+
+def test_contact_email_too_long_message(client):
+    form = {**VALID_FORM, "contact_email": "a" * 250 + "@example.com"}
+    resp = client.post("/api/bfsi/submissions", data=form, files=_pdf_file())
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Contact email is too long."
+
+
+def test_field_checks_run_in_order_borrower_before_cin(client):
+    # Both borrower_name and cin_gstin are invalid -- the earlier check (borrower)
+    # must win, proving the checks run in the documented order.
+    form = {**VALID_FORM, "borrower_name": "", "cin_gstin": "bad"}
+    resp = client.post("/api/bfsi/submissions", data=form, files=_pdf_file())
+    assert resp.json()["detail"] == "Borrower name is required."
+
+
+def test_public_submit_missing_file(client):
+    resp = client.post("/api/bfsi/submissions", data=VALID_FORM)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Report upload failed."
+
+
+def test_public_submit_file_too_large(client):
+    big = b"%PDF" + b"0" * (20 * 1024 * 1024 + 1)
+    resp = client.post("/api/bfsi/submissions", data=VALID_FORM, files=_pdf_file(big))
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Report must be under 20 MB."
+
+
+def test_public_submit_disallowed_extension(client):
+    resp = client.post(
+        "/api/bfsi/submissions", data=VALID_FORM,
+        files={"report_file": ("report.txt", b"hello", "text/plain")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Only PDF or DOCX accepted."
+
+
+def test_public_submit_content_mismatch(client):
+    resp = client.post(
+        "/api/bfsi/submissions", data=VALID_FORM,
+        files={"report_file": ("report.pdf", b"not a pdf", "application/pdf")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "File content does not match its type."
+
+
+def test_public_submit_valid_stores_document_and_notifies(client, db, monkeypatch):
+    calls = []
+
+    def fake_send(to, subject, body, **kw):
+        calls.append({"to": to, "subject": subject, "body": body, **kw})
+        return True
+
+    monkeypatch.setattr("app.bfsi.router_public.send_mail_best_effort", fake_send)
+
+    resp = client.post("/api/bfsi/submissions", data=VALID_FORM, files=_pdf_file())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["ok"] is True and body["id"]
+
+    doc = db.bfsi_submissions.find_one({"_id": ObjectId(body["id"])})
+    assert doc["borrower_name"] == "Acme Pvt Ltd"
+    assert doc["cin_gstin"] == "U12345MH2015PLC123456"
+    assert doc["status"] == "new"
+    assert doc["answers"] == []
+    assert doc["file_path"]
+
+    assert len(calls) == 1
+    assert calls[0]["to"] == [settings.team_email]
+    assert calls[0]["subject"] == "BFSI ESG Submission — Acme Pvt Ltd"
+    assert calls[0]["reply_to"] == "borrower@example.com"
+    assert calls[0]["attachments"][0].filename == "report.pdf"
+
+
+def test_public_submit_rate_limited_after_five(client):
+    for _ in range(5):
+        resp = client.post("/api/bfsi/submissions", data=VALID_FORM, files=_pdf_file())
+        assert resp.status_code == 201
+    resp = client.post("/api/bfsi/submissions", data=VALID_FORM, files=_pdf_file())
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == "Too many submissions — please try again later."
+
+
+# --- admin: auth -------------------------------------------------------------------------
+
+def test_admin_list_requires_auth(client):
+    resp = client.get("/api/admin/bfsi/submissions")
+    assert resp.status_code == 401
+
+
+# --- admin: submissions list + calculator -------------------------------------------------
+
+def test_admin_list_search_and_pagination(admin_client, db):
+    _seed_submission(db, borrower_name="Wipro Finance")
+    _seed_submission(db, borrower_name="Someone Else")
+    resp = admin_client.get("/api/admin/bfsi/submissions", params={"search": "wipro"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1 and len(body["items"]) == 1
+    assert body["items"][0]["borrower_name"] == "Wipro Finance"
+    assert isinstance(body["items"][0]["_id"], str)
+    assert body["page"] == 1 and body["pages"] == 1
+
+
+def test_admin_get_submission_missing_404(admin_client):
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{ObjectId()}")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
+
+
+def test_admin_get_submission_invalid_id_404(admin_client):
+    resp = admin_client.get("/api/admin/bfsi/submissions/not-an-object-id")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
+
+
+def test_admin_calculator_creates_no_mail_no_rate_limit(admin_client, db, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+
+    def boom(*a, **kw):
+        raise AssertionError("admin calculator must not send mail")
+
+    monkeypatch.setattr("app.bfsi.router_public.send_mail_best_effort", boom)
+
+    # More than 5 submissions must all succeed -- no rate limit on the admin path.
+    for _ in range(6):
+        resp = admin_client.post("/api/admin/bfsi/submissions", data=VALID_FORM, files=_pdf_file())
+        assert resp.status_code == 201
+        assert "id" in resp.json()
+
+
+# --- admin: records (Add New) --------------------------------------------------------------
+
+def test_admin_create_record_valid(admin_client, db):
+    payload = {
+        "borrower_name": "Manual Co",
+        "cin_gstin": "u12345mh2015plc123456",
+        "industry": "manufacturing",
+        "sub_sector": "Anything Free Text",
+        "loan_amount": 500000,
+        "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan",
+        "status": "new",
+    }
+    resp = admin_client.post("/api/admin/bfsi/records", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inserted"] is True and body["id"]
+    doc = db.bfsi_submissions.find_one({"_id": ObjectId(body["id"])})
+    assert doc["cin_gstin"] == "U12345MH2015PLC123456"
+    assert doc["file_path"] == "" and doc["file_sha256"] == "" and doc["submit_ip"] == ""
+    assert doc["answers"] == []
+
+
+@pytest.mark.parametrize("bad_field,bad_value", [
+    ("industry", "not-a-key"),
+    ("loan_purpose", "Not A Purpose"),
+    ("loan_type", "Not A Type"),
+])
+def test_admin_create_record_invalid_silently_skipped(admin_client, db, bad_field, bad_value):
+    payload = {
+        "borrower_name": "Manual Co", "cin_gstin": "x", "industry": "manufacturing",
+        "sub_sector": "x", "loan_amount": 1, "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan", "status": "new",
+    }
+    payload[bad_field] = bad_value
+    resp = admin_client.post("/api/admin/bfsi/records", json=payload)
+    assert resp.status_code == 200
+    assert resp.json() == {"inserted": False}
+    assert db.bfsi_submissions.count_documents({}) == 0
+
+
+# --- admin: CSV import -----------------------------------------------------------------
+
+IMPORT_HEADER = "borrower_name,cin_gstin,contact_email,industry,sub_sector,loan_amount,loan_purpose,loan_type,outstanding_loans,overall_score,grade,status"
+
+
+def test_admin_import_bad_header(admin_client):
+    csv_text = "wrong,header\nfoo,bar\n"
+    resp = admin_client.post(
+        "/api/admin/bfsi/import",
+        files={"file": ("bad.csv", csv_text.encode(), "text/csv")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "Error: CSV header row does not match the expected format. Expected: " + IMPORT_HEADER
+    )
+
+
+def test_admin_import_non_csv_extension_rejected(admin_client):
+    resp = admin_client.post(
+        "/api/admin/bfsi/import",
+        files={"file": ("data.txt", b"whatever", "text/plain")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Invalid file type. Please upload a .csv file."
+
+
+def test_admin_import_good_file_two_inserted_one_skipped(admin_client, db):
+    rows = [
+        IMPORT_HEADER,
+        "ACME Pvt Ltd,27AAAAA0000A1Z5,contact@acme.com,it,SaaS,1000000,Working Capital,Working Capital,0,85,B,new",
+        # Bad row: industry is not a known key -> skipped.
+        "Beta Co,BADCIN12345678901234,b@example.com,not-a-key,SaaS,100000,Working Capital,Working Capital,0,,,new",
+        "Gamma Co,,,manufacturing,Textiles,200000,Working Capital,Term Loan,0,,,",
+    ]
+    csv_text = "\n".join(rows) + "\n"
+
+    resp = admin_client.post(
+        "/api/admin/bfsi/import",
+        files={"file": ("good.csv", csv_text.encode(), "text/csv")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Import complete: 2 row(s) inserted, 1 row(s) skipped."
+    assert db.bfsi_submissions.count_documents({"imported": True}) == 2
+
+
+# --- admin: analyze ---------------------------------------------------------------------
+
+def test_admin_analyze_sets_grade_and_overall_and_caches(admin_client, db, fake_bfsi, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    sub_id = _seed_submission(db)
+
+    resp = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    assert resp.status_code == 202
+    assert resp.json() == {"started": True}
+
+    doc = db.bfsi_submissions.find_one({"_id": sub_id})
+    assert doc["status"] == "report_generated"
+    assert doc["grade"] in ("A+", "A", "B+", "B", "C", "D")
+    assert doc["overall_score"] is not None
+    assert doc["e_score"] == 70.0 and doc["s_score"] == 60.0 and doc["g_score"] == 50.0
+    assert db.bfsi_report.count_documents({"submission_id": sub_id}) == 1
+    assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 1
+    assert fake_bfsi.batch_calls > 0
+
+    calls_before = fake_bfsi.batch_calls
+    json_calls_before = fake_bfsi.json_calls
+
+    resp2 = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    assert resp2.status_code == 202
+    # Second run hits the text-hash cache -- no further LLM calls.
+    assert fake_bfsi.batch_calls == calls_before
+    assert fake_bfsi.json_calls == json_calls_before
+    assert db.bfsi_report.count_documents({"submission_id": sub_id}) == 2
+    assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 1
+
+
+def test_admin_analyze_conflict_while_running(admin_client, db):
+    sub_id = _seed_submission(db, analysis_status="running")
+    resp = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Analysis is already running."
+
+
+def test_admin_get_submission_detail_overall_and_previous(admin_client, db):
+    # Older, already-scored submission for the same CIN.
+    older_id = _seed_submission(
+        db, ai_analysis={"e_score": 1}, overall_score=55.5,
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    newer_id = _seed_submission(
+        db, e_score=80.0, s_score=70.0, g_score=60.0,
+        created_at=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+    # Ensure newer_id sorts after older_id (mongomock ObjectIds are already monotonic
+    # by insertion order, but assert to catch flakiness).
+    assert str(newer_id) > str(older_id)
+
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{newer_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["overall"]["overall"] is not None
+    assert body["recommendation"]
+    assert body["industry_label"] == "Manufacturing"
+    assert body["previous"]["overall"] == 55.5
+
+
+def test_admin_get_submission_detail_no_scores_yet(admin_client, db):
+    sub_id = _seed_submission(db)
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{sub_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["overall"] is None
+    assert body["recommendation"] is None
+    assert body["previous"] is None
+
+
+def test_admin_download_submission_file(admin_client, db):
+    sub_id = _seed_submission(db)
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{sub_id}/file")
+    assert resp.status_code == 200
+    doc = db.bfsi_submissions.find_one({"_id": sub_id})
+    assert f'filename="{doc["file_path"]}"' in resp.headers["content-disposition"]
+
+
+# --- admin: delete cascade ---------------------------------------------------------------
+
+def test_admin_delete_cascade_removes_report_hashes_and_file(admin_client, db):
+    sub_id = _seed_submission(db)
+    doc = db.bfsi_submissions.find_one({"_id": sub_id})
+    stored_path = upload_path("bfsi", doc["file_path"])
+    assert stored_path.is_file()
+
+    db.bfsi_report.insert_one({"submission_id": sub_id, "filename": "x", "analysis": {}, "overall_score": 1})
+    db.bfsi_hashes.insert_one({"submission_id": sub_id, "filename": "x", "hash": "h", "llm_response": {}})
+    db.bfsi_ocr_cache.insert_one({"file_sha256": doc["file_sha256"], "filename": "x", "pages": []})
+
+    resp = admin_client.delete(f"/api/admin/bfsi/submissions/{sub_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] is True and body["report"] == 1 and body["hashes"] == 1
+    assert body["ocr"] == 1 and body["file"] is True
+
+    assert db.bfsi_submissions.find_one({"_id": sub_id}) is None
+    assert db.bfsi_report.count_documents({"submission_id": sub_id}) == 0
+    assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 0
+    assert db.bfsi_ocr_cache.count_documents({"file_sha256": doc["file_sha256"]}) == 0
+    assert not stored_path.is_file()
+
+
+def test_admin_delete_keeps_ocr_cache_when_another_submission_shares_hash(admin_client, db):
+    shared_sha = "shared-hash-value"
+    id1 = _seed_submission(db, file_sha256=shared_sha)
+    id2 = _seed_submission(db, file_sha256=shared_sha)
+    db.bfsi_ocr_cache.insert_one({"file_sha256": shared_sha, "filename": "x", "pages": []})
+
+    resp = admin_client.delete(f"/api/admin/bfsi/submissions/{id1}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] is True
+    # id2 still shares the hash, so the OCR cache row survives.
+    assert body["ocr"] == 0
+    assert db.bfsi_ocr_cache.count_documents({"file_sha256": shared_sha}) == 1
+
+    resp2 = admin_client.delete(f"/api/admin/bfsi/submissions/{id2}")
+    body2 = resp2.json()
+    assert body2["ocr"] == 1
+    assert db.bfsi_ocr_cache.count_documents({"file_sha256": shared_sha}) == 0
+
+
+def test_admin_delete_missing_returns_not_found(admin_client, db):
+    resp = admin_client.delete(f"/api/admin/bfsi/submissions/{ObjectId()}")
+    assert resp.status_code == 404
+
+
+# --- admin: send report -------------------------------------------------------------------
+
+def _pdf_bytes(tag: bytes = b"fake") -> bytes:
+    return b"%PDF-1.4 " + tag
+
+
+def test_admin_send_requires_analysis(admin_client, db):
+    sub_id = _seed_submission(db)  # no ai_analysis
+    resp = admin_client.post(
+        f"/api/admin/bfsi/submissions/{sub_id}/send",
+        files=[("pdfs", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Run the analysis before sending the report."
+
+
+def test_admin_send_requires_contact_email(admin_client, db):
+    sub_id = _seed_submission(db, ai_analysis={"e_score": 1}, contact_email="")
+    resp = admin_client.post(
+        f"/api/admin/bfsi/submissions/{sub_id}/send",
+        files=[("pdfs", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "This submission has no contact email."
+
+
+def test_admin_send_without_smtp_is_503(admin_client, db):
+    sub_id = _seed_submission(db, ai_analysis={"e_score": 1})
+    resp = admin_client.post(
+        f"/api/admin/bfsi/submissions/{sub_id}/send",
+        files=[("pdfs", ("a.pdf", _pdf_bytes(), "application/pdf"))],
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Mail is not configured"
+
+
+def test_admin_send_success_marks_sent_and_sends_both_attachments(admin_client, db, monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.com")
+    monkeypatch.setattr(settings, "smtp_user", "user@example.com")
+    monkeypatch.setattr(settings, "smtp_password", "pw")
+
+    sub_id = _seed_submission(db, ai_analysis={"e_score": 1})
+
+    calls = []
+
+    def fake_send_mail(to, subject, body, *, cc=None, reply_to=None, attachments=None):
+        calls.append({"to": to, "subject": subject, "body": body, "cc": cc, "attachments": attachments})
+
+    monkeypatch.setattr("app.bfsi.router_admin.send_mail", fake_send_mail)
+
+    resp = admin_client.post(
+        f"/api/admin/bfsi/submissions/{sub_id}/send",
+        files=[
+            ("pdfs", ("detailed.pdf", _pdf_bytes(b"detailed"), "application/pdf")),
+            ("pdfs", ("onepager.pdf", _pdf_bytes(b"onepager"), "application/pdf")),
+        ],
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["to"] == ["borrower@example.com"]
+    assert call["cc"] == [settings.team_email]
+    assert call["subject"] == "Your BFSI ESG Credit Risk Report — Acme Pvt Ltd"
+    assert [a.filename for a in call["attachments"]] == [
+        f"bfsi-detailed-report-{sub_id}.pdf", f"esg-rating-report-{sub_id}.pdf",
+    ]
+
+    doc = db.bfsi_submissions.find_one({"_id": sub_id})
+    assert doc["status"] == "sent"
+    assert doc["sent_at"] is not None
+
+
+def test_admin_send_rejects_non_pdf_content(admin_client, db, monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.com")
+    monkeypatch.setattr(settings, "smtp_user", "user@example.com")
+    monkeypatch.setattr(settings, "smtp_password", "pw")
+
+    sub_id = _seed_submission(db, ai_analysis={"e_score": 1})
+    resp = admin_client.post(
+        f"/api/admin/bfsi/submissions/{sub_id}/send",
+        files=[("pdfs", ("a.pdf", b"not a pdf", "application/pdf"))],
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "File content does not match its type."
