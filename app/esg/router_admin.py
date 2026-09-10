@@ -3,6 +3,7 @@ import ast
 import csv
 import io
 import math
+import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -16,9 +17,9 @@ from app.core.errors import UserError
 from app.core.jobs import start_job
 from app.core.mail import Attachment, mail_configured, send_mail
 from app.core.net import client_ip
-from app.core.uploads import upload_path
+from app.core.uploads import read_limited, upload_path
 from app.esg import store
-from app.esg.submissions import create_esg_submission, esg_submissions_collection, run_esg_analysis, serialize_doc
+from app.esg.submissions import MAX_FILE_BYTES, create_esg_submission, esg_submissions_collection, run_esg_analysis, serialize_doc
 from app.mailtpl import esg_report_mail
 
 router = APIRouter(prefix="/api/admin/esg", tags=["admin-esg"])
@@ -45,8 +46,9 @@ def _get_submission_or_404(sub_id: ObjectId) -> dict:
 @router.get("/submissions")
 def list_submissions(search: str = "", page: int = 1, admin: str = Depends(require_admin)):
     query = {}
+    search = search.strip()
     if search:
-        rx = {"$regex": search, "$options": "i"}
+        rx = {"$regex": re.escape(search), "$options": "i"}
         query = {"$or": [{"name": rx}, {"company_name": rx}, {"email": rx}]}
     total = esg_submissions_collection().count_documents(query)
     page = max(page, 1)
@@ -74,7 +76,7 @@ async def create_submission(
     file: UploadFile | None = File(None),
     admin: str = Depends(require_admin),
 ):
-    data = await file.read() if file is not None else b""
+    data = await read_limited(file, MAX_FILE_BYTES, "The uploaded file is too large.") if file is not None else b""
     filename = file.filename if file is not None else ""
     form = {
         "name": name,
@@ -140,9 +142,7 @@ async def send_report(id: str, pdf: UploadFile = File(...), admin: str = Depends
     if not doc.get("final"):
         raise HTTPException(409, "Run the analysis before sending the report.")
 
-    data = await pdf.read()
-    if len(data) > MAX_SEND_PDF_BYTES:
-        raise UserError("The uploaded file is too large.")
+    data = await read_limited(pdf, MAX_SEND_PDF_BYTES, "The uploaded file is too large.")
     if not data.startswith(b"%PDF"):
         raise UserError("File content does not match its type.")
 

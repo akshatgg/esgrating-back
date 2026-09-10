@@ -66,6 +66,7 @@ def test_client_ip_trust_proxy_false(monkeypatch):
 
 def test_client_ip_trust_proxy_true_cf_connecting_ip(monkeypatch):
     monkeypatch.setattr(net.settings, "trust_proxy", True)
+    monkeypatch.setattr(net.settings, "trust_cloudflare", True)
     scope = {
         "type": "http",
         "headers": [(b"cf-connecting-ip", b"1.2.3.4"), (b"x-forwarded-for", b"5.6.7.8")],
@@ -77,13 +78,15 @@ def test_client_ip_trust_proxy_true_cf_connecting_ip(monkeypatch):
 
 def test_client_ip_trust_proxy_true_x_forwarded_for(monkeypatch):
     monkeypatch.setattr(net.settings, "trust_proxy", True)
+    monkeypatch.setattr(net.settings, "trusted_proxy_hops", 1)
     scope = {
         "type": "http",
         "headers": [(b"x-forwarded-for", b"5.6.7.8, 6.6.6.6")],
         "client": ("9.9.9.9", 1234),
     }
     request = Request(scope)
-    assert net.client_ip(request) == "5.6.7.8"
+    # The rightmost entry is the one our own proxy appended; the leftmost is client-forgeable.
+    assert net.client_ip(request) == "6.6.6.6"
 
 
 def test_client_ip_trust_proxy_true_x_forwarded_for_with_spaces(monkeypatch):

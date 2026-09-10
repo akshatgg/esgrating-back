@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     team_email: str = "info@esgratings.co.in"
     web_origin: str = "http://localhost:3000"
     trust_proxy: bool = False
+    # With trust_proxy: the client IP is the X-Forwarded-For entry this many places from
+    # the right (the address our own proxy appended), not the spoofable leftmost one.
+    trusted_proxy_hops: int = 1
+    # With trust_proxy: read CF-Connecting-IP. Only safe when the origin accepts traffic
+    # from Cloudflare alone; otherwise any client can set that header.
+    trust_cloudflare: bool = False
 
 
 settings = Settings()

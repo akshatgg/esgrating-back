@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from app.core.net import client_ip
-from app.esg.submissions import create_esg_submission, esg_submissions_collection
+from app.core.uploads import read_limited
+from app.esg.submissions import MAX_FILE_BYTES, create_esg_submission, esg_submissions_collection
 
 router = APIRouter(prefix="/api/esg", tags=["esg"])
 
@@ -29,7 +30,7 @@ async def submit_esg(
     if recent >= RATE_LIMIT_MAX_SUBMISSIONS:
         raise HTTPException(429, "Too many submissions — please try again later.")
 
-    data = await file.read() if file is not None else b""
+    data = await read_limited(file, MAX_FILE_BYTES, "The uploaded file is too large.") if file is not None else b""
     filename = file.filename if file is not None else ""
     form = {
         "name": name,

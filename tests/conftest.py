@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 from app.core import db as dbmod
 from app.core.config import settings
 
+# app.main's lifespan refuses to start without a real (32+ char) SESSION_SECRET; don't
+# depend on a local .env being present.
+settings.session_secret = "test-session-secret-" + "x" * 44
+
 
 @pytest.fixture
 def db():

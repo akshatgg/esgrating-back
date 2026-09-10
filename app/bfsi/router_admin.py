@@ -14,21 +14,23 @@ from pydantic import BaseModel
 
 from app.auth.deps import require_admin
 from app.bfsi import store
-from app.bfsi.options import INDUSTRIES, LOAN_PURPOSES, LOAN_TYPES
+from app.bfsi.options import INDUSTRIES, LOAN_PURPOSES, LOAN_TYPES, MAX_UPLOAD_MB
 from app.bfsi.scoring import bfsi_overall, bfsi_recommendation
-from app.bfsi.submission import run_bfsi_analysis, store_submission
+from app.bfsi.submission import MAX_UPLOAD_BYTES, run_bfsi_analysis, store_submission
 from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import start_job
 from app.core.mail import Attachment, mail_configured, send_mail
 from app.core.net import client_ip
-from app.core.uploads import upload_path
+from app.core.uploads import read_limited, upload_path
 from app.mailtpl import bfsi_report_mail
 
 router = APIRouter(prefix="/api/admin/bfsi", tags=["admin-bfsi"])
 
 PAGE_SIZE = 50
 MAX_SEND_PDF_BYTES = 15 * 1024 * 1024
+# admin/import.php had no size cap of its own; this only bounds memory use.
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
 # Order matches the front end: the detailed report is rendered first, then the
 # one-pager (web-task-W7-brief.md "getPdfs renders both ... then generates both PDFs").
 SEND_FILE_NAMES = ["bfsi-detailed-report-{id}.pdf", "esg-rating-report-{id}.pdf"]
@@ -90,7 +92,10 @@ async def create_submission(
 ):
     """admin/calculator.php: same fields as the public form, no CSRF, no rate limit,
     no mail; redirects (here: starts analysis) on success."""
-    data = await report_file.read() if report_file is not None else b""
+    data = (
+        await read_limited(report_file, MAX_UPLOAD_BYTES, f"Report must be under {MAX_UPLOAD_MB} MB.")
+        if report_file is not None else b""
+    )
     filename = report_file.filename if report_file is not None else ""
     form = {
         "borrower_name": borrower_name,
@@ -198,7 +203,7 @@ async def import_csv(file: UploadFile = File(...), admin: str = Depends(require_
     if not filename.lower().endswith(".csv"):
         raise UserError("Invalid file type. Please upload a .csv file.")
 
-    data = await file.read()
+    data = await read_limited(file, MAX_IMPORT_BYTES, "The uploaded file is too large.")
     if not data:
         raise UserError("File upload failed or file was not received.")
 
@@ -343,9 +348,7 @@ async def send_report(id: str, pdfs: list[UploadFile] = File(...), admin: str = 
 
     attachments = []
     for i, f in enumerate(pdfs[:2]):
-        data = await f.read()
-        if len(data) > MAX_SEND_PDF_BYTES:
-            raise UserError("The uploaded file is too large.")
+        data = await read_limited(f, MAX_SEND_PDF_BYTES, "The uploaded file is too large.")
         if not data.startswith(b"%PDF"):
             raise UserError("File content does not match its type.")
         attachments.append(Attachment(SEND_FILE_NAMES[i].format(id=id), data, "application/pdf"))

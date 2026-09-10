@@ -1,11 +1,12 @@
 import logging, threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from bson import ObjectId
 from app.core.db import get_db
 
 log = logging.getLogger(__name__)
 RUN_INLINE = False
+STALE_AFTER = timedelta(minutes=30)
 JOB_COLLECTIONS = ("esg_submissions", "bfsi_submissions")
 
 
@@ -21,9 +22,15 @@ def _run(collection: str, doc_id: ObjectId, fn: Callable[[], None]) -> None:
 
 def start_job(collection: str, doc_id: ObjectId, fn: Callable[[], None]) -> bool:
     col = get_db()[collection]
+    now = datetime.now(timezone.utc)
+    # A "running" doc whose worker hung would otherwise answer 409 until a restart, so a
+    # run older than STALE_AFTER may be reclaimed.
     claimed = col.find_one_and_update(
-        {"_id": doc_id, "analysis_status": {"$ne": "running"}},
-        {"$set": {"analysis_status": "running", "analysis_error": None, "analysis_started_at": datetime.now(timezone.utc)}},
+        {"_id": doc_id, "$or": [
+            {"analysis_status": {"$ne": "running"}},
+            {"analysis_started_at": {"$lt": now - STALE_AFTER}},
+        ]},
+        {"$set": {"analysis_status": "running", "analysis_error": None, "analysis_started_at": now}},
     )
     if claimed is None:
         return False

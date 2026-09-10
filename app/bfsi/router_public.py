@@ -4,11 +4,12 @@
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from app.bfsi import store
-from app.bfsi.options import INDUSTRIES, options_payload
-from app.bfsi.submission import store_submission
+from app.bfsi.options import INDUSTRIES, MAX_UPLOAD_MB, options_payload
+from app.bfsi.submission import MAX_UPLOAD_BYTES, store_submission
 from app.core.config import settings
 from app.core.mail import Attachment, send_mail_best_effort
 from app.core.net import client_ip
+from app.core.uploads import read_limited
 from app.mailtpl import bfsi_team_notice
 
 router = APIRouter(prefix="/api/bfsi", tags=["bfsi"])
@@ -40,7 +41,10 @@ async def submit_bfsi(
     if store.count_recent_by_ip(ip, RATE_LIMIT_WINDOW_MINUTES) >= RATE_LIMIT_MAX_SUBMISSIONS:
         raise HTTPException(429, "Too many submissions — please try again later.")
 
-    data = await report_file.read() if report_file is not None else b""
+    data = (
+        await read_limited(report_file, MAX_UPLOAD_BYTES, f"Report must be under {MAX_UPLOAD_MB} MB.")
+        if report_file is not None else b""
+    )
     filename = report_file.filename if report_file is not None else ""
     form = {
         "borrower_name": borrower_name,

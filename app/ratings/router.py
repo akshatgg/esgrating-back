@@ -14,10 +14,14 @@ from pydantic import BaseModel
 
 from app.auth.deps import require_admin
 from app.core.errors import UserError
+from app.core.uploads import read_limited
 from app.ratings import store
 
 public_router = APIRouter(prefix="/api", tags=["ratings"])
 admin_router = APIRouter(prefix="/api/admin/ratings", tags=["admin-ratings"])
+
+# dashboard/import.php had no size cap of its own; this only bounds memory use.
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
 
 PAGE_SIZE = 50
 
@@ -84,14 +88,21 @@ def admin_list(search: str = "", page: int = 1, admin: str = Depends(require_adm
     return {"items": items, "total": total, "page": page, "pages": pages}
 
 
+def _rating_fields(payload: RatingIn) -> dict:
+    # Same date normalization as the CSV import, so the public list formats every row alike.
+    fields = payload.model_dump()
+    fields["date_of_rating"] = _normalize_date(fields["date_of_rating"])
+    return fields
+
+
 @admin_router.post("", status_code=201)
 def admin_create(payload: RatingIn, admin: str = Depends(require_admin)):
-    return store.insert_rating(payload.model_dump())
+    return store.insert_rating(_rating_fields(payload))
 
 
 @admin_router.put("/{s_no}")
 def admin_update(s_no: int, payload: RatingIn, admin: str = Depends(require_admin)):
-    if not store.update_rating(s_no, payload.model_dump()):
+    if not store.update_rating(s_no, _rating_fields(payload)):
         raise HTTPException(404, "Not found")
     return {"ok": True}
 
@@ -105,7 +116,7 @@ def admin_delete(s_no: int, admin: str = Depends(require_admin)):
 
 @admin_router.post("/import")
 async def import_csv(file: UploadFile = File(...), admin: str = Depends(require_admin)):
-    data = await file.read()
+    data = await read_limited(file, MAX_IMPORT_BYTES, "The uploaded file is too large.")
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:

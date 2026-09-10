@@ -78,7 +78,9 @@ def bfsi_ocr_pdf(path: Path) -> dict:
                     str(path), str(workdir / "pg"),
                 ],
                 capture_output=True, text=True, errors="replace",
-                timeout=30,
+                # PHP had no per-call limit here; a 60-page scan can legitimately take
+                # longer than 30s to rasterise, so bound it by the overall budget instead.
+                timeout=TIME_BUDGET,
             )
         except (OSError, subprocess.TimeoutExpired):
             return {"pages": [], "truncated": False}
