@@ -9,11 +9,15 @@ from app.auth.router import router as auth_router
 from app.bfsi.router_admin import router as bfsi_admin_router
 from app.bfsi.router_public import router as bfsi_public_router
 from app.bfsi.store import ensure_indexes as ensure_bfsi_indexes
+from app.contact.router import router as contact_router
 from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
 from app.esg.router_admin import router as esg_admin_router
 from app.esg.router_public import router as esg_public_router
+from app.ratings.router import admin_router as ratings_admin_router
+from app.ratings.router import public_router as ratings_public_router
+from app.ratings.store import ensure_indexes as ensure_ratings_indexes
 
 
 @asynccontextmanager
@@ -27,6 +31,10 @@ async def lifespan(_app: FastAPI):
         ensure_bfsi_indexes()
     except Exception as e:
         logging.getLogger(__name__).warning("could not ensure bfsi indexes: %s", e)
+    try:
+        ensure_ratings_indexes()
+    except Exception as e:
+        logging.getLogger(__name__).warning("could not ensure ratings indexes: %s", e)
     yield
 
 
@@ -45,6 +53,9 @@ app.include_router(esg_public_router)
 app.include_router(esg_admin_router)
 app.include_router(bfsi_public_router)
 app.include_router(bfsi_admin_router)
+app.include_router(ratings_public_router)
+app.include_router(ratings_admin_router)
+app.include_router(contact_router)
 
 
 @app.exception_handler(UserError)
