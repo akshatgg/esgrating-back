@@ -15,6 +15,7 @@ from app.dashboard.router import router as dashboard_router
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
 from app.core.mail import MailError
+from app.esg.combined import router as esg_combined_router
 from app.esg.router_admin import router as esg_admin_router
 from app.esg.router_public import router as esg_public_router
 from app.ratings.router import admin_router as ratings_admin_router
@@ -70,6 +71,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(esg_public_router)
 app.include_router(esg_admin_router)
+app.include_router(esg_combined_router)
 app.include_router(bfsi_public_router)
 app.include_router(bfsi_admin_router)
 app.include_router(ratings_public_router)

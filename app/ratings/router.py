@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from app.auth.deps import require_admin
 from app.core.errors import UserError
 from app.core.uploads import read_limited
+from app.esg.combined import rating_item
 from app.ratings import store
 
 public_router = APIRouter(prefix="/api", tags=["ratings"])
@@ -98,6 +99,14 @@ def _rating_fields(payload: RatingIn) -> dict:
 @admin_router.post("", status_code=201)
 def admin_create(payload: RatingIn, admin: str = Depends(require_admin)):
     return store.insert_rating(_rating_fields(payload))
+
+
+@admin_router.get("/{s_no}")
+def admin_get(s_no: int, admin: str = Depends(require_admin)):
+    doc = store.get_rating(s_no)
+    if not doc:
+        raise HTTPException(404, "Not found")
+    return rating_item(doc)
 
 
 @admin_router.put("/{s_no}")
