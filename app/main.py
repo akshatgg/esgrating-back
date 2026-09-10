@@ -11,6 +11,7 @@ from app.bfsi.router_public import router as bfsi_public_router
 from app.bfsi.store import ensure_indexes as ensure_bfsi_indexes
 from app.contact.router import router as contact_router
 from app.core.config import settings
+from app.dashboard.router import router as dashboard_router
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
 from app.esg.router_admin import router as esg_admin_router
@@ -56,6 +57,7 @@ app.include_router(bfsi_admin_router)
 app.include_router(ratings_public_router)
 app.include_router(ratings_admin_router)
 app.include_router(contact_router)
+app.include_router(dashboard_router)
 
 
 @app.exception_handler(UserError)
