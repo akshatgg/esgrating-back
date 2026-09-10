@@ -24,19 +24,19 @@ def mail_configured() -> bool:
 def send_mail(to, subject, body, *, cc=None, reply_to=None, attachments=None) -> None:
     if not mail_configured():
         raise MailError("Mail is not configured")
-    msg = EmailMessage()
-    msg["From"] = settings.mail_from
-    msg["To"] = ", ".join(to)
-    if cc:
-        msg["Cc"] = ", ".join(cc)
-    if reply_to:
-        msg["Reply-To"] = reply_to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    for a in attachments or []:
-        maintype, _, subtype = a.mime.partition("/")
-        msg.add_attachment(a.content, maintype=maintype, subtype=subtype or "octet-stream", filename=a.filename)
     try:
+        msg = EmailMessage()
+        msg["From"] = settings.mail_from
+        msg["To"] = ", ".join(to)
+        if cc:
+            msg["Cc"] = ", ".join(cc)
+        if reply_to:
+            msg["Reply-To"] = reply_to
+        msg["Subject"] = subject
+        msg.set_content(body)
+        for a in attachments or []:
+            maintype, _, subtype = a.mime.partition("/")
+            msg.add_attachment(a.content, maintype=maintype, subtype=subtype or "octet-stream", filename=a.filename)
         if settings.smtp_ssl:
             with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=ssl.create_default_context(), timeout=30) as s:
                 s.login(settings.smtp_user, settings.smtp_password)
@@ -46,7 +46,7 @@ def send_mail(to, subject, body, *, cc=None, reply_to=None, attachments=None) ->
                 s.starttls(context=ssl.create_default_context())
                 s.login(settings.smtp_user, settings.smtp_password)
                 s.send_message(msg)
-    except (smtplib.SMTPException, OSError) as e:
+    except Exception as e:
         raise MailError(str(e)) from e
 
 

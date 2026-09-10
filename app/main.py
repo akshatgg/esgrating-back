@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -14,8 +15,8 @@ async def lifespan(_app: FastAPI):
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     try:
         reset_interrupted_jobs()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning("could not reset interrupted jobs: %s", e)
     yield
 
 
