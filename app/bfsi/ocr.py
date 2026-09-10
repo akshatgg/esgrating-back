@@ -49,8 +49,9 @@ def _ocr_image(image_path: Path) -> str:
         proc = subprocess.run(
             ["tesseract", image_path.name, "stdout", "-l", "eng"],
             capture_output=True, text=True, errors="replace", cwd=image_path.parent,
+            timeout=30,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return ""
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
@@ -77,8 +78,9 @@ def bfsi_ocr_pdf(path: Path) -> dict:
                     str(path), str(workdir / "pg"),
                 ],
                 capture_output=True, text=True, errors="replace",
+                timeout=30,
             )
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             return {"pages": [], "truncated": False}
 
         if proc.returncode != 0:

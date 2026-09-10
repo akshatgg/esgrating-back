@@ -38,8 +38,8 @@ def _pdf_font_count(path: Path) -> int | None:
     if shutil.which("pdffonts") is None:
         return None
     try:
-        proc = subprocess.run(["pdffonts", str(path)], capture_output=True, text=True, errors="replace")
-    except OSError:
+        proc = subprocess.run(["pdffonts", str(path)], capture_output=True, text=True, errors="replace", timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
