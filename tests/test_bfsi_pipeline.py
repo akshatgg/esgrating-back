@@ -80,29 +80,79 @@ PAGES = [{"page_no": 1, "text": "alpha beta"}, {"page_no": 2, "text": "gamma del
 # --------------------------------------------------------------------------- prompts
 
 def test_criteria_are_verbatim():
-    assert pipeline.CRITERIA["E"].startswith("1. Renewable energy usage initiatives.\n")
-    assert pipeline.CRITERIA["E"].endswith("18. Life on land")
-    assert pipeline.CRITERIA["S"].endswith("18. Peace, justice, and strong institution")
-    assert pipeline.CRITERIA["G"].endswith("17. Partnership for the goals.")
-    assert len(pipeline.CRITERIA["E"].split("\n")) == 18
-    assert len(pipeline.CRITERIA["S"].split("\n")) == 18
-    assert len(pipeline.CRITERIA["G"].split("\n")) == 17
-    # ESG-calculator oddities that must survive the port
-    assert "10. Good health and well - being" in pipeline.CRITERIA["S"]
-    assert "17. Life below the river" in pipeline.CRITERIA["E"]
+    # Full equality against the literal, not substrings — a substring/line-count
+    # check would miss a change like "Sanitation Practises" -> "Practices" or a
+    # reordered/re-indented line as long as the start/end anchors still matched.
+    assert pipeline.CRITERIA["E"] == """1. Renewable energy usage initiatives.
+2. Carbon footprint reduction goals.
+3. Waste management policies.
+4. Transparency in environmental disclosures.
+5. Biodiversity conservation efforts.
+6. Water conservation and management practices.
+7. Pollution control measures.
+8. Sustainable sourcing and supply chain practices.
+9. Compliance with environmental regulations.
+10. Any other relevant environmental factors.
+11. Urbanisation and Economic Growth
+12. Climate and Resilience
+13. Sanitation Practises
+14. Housing and Urban Infrastructure
+15. Affordable and clean energy
+16. Climate action
+17. Life below the river
+18. Life on land"""
+    assert pipeline.CRITERIA["S"] == """1. Diversity, equity, and inclusion efforts.
+2. Employee welfare and safety.
+3. Community engagement initiatives.
+4. Human rights policies and practices.
+5. Data and Digital
+6. Youth and Inclusion
+7. Urban Livelihood
+8. No poverty
+9. Zero hunger
+10. Good health and well - being
+11. Quality education
+12. Gender Equality
+13. Access to Clean water and sanitation
+14. Decent work and economic growth
+15. Sustainable cities and communities
+16. Reduced inequality
+17. Responsible consumption and production
+18. Peace, justice, and strong institution"""
+    assert pipeline.CRITERIA["G"] == """1. Board diversity and ethical leadership.
+2. Compliance with regulations.
+3. Accountability and stakeholder involvement.
+4. Anti-corruption and bribery policies.
+5. Executive compensation practices.
+6. Shareholder rights and activism.
+7. Data privacy and security measures.
+8. Risk management and internal controls.
+9. Transparency in financial reporting.
+10. Legal and regulatory compliance.
+11. Business ethics and code of conduct.
+12. Corporate social responsibility initiatives.
+13. Whistleblower protection policies.
+14. Conflicts of interest management.
+15. Urban Governance and Municipal Finance
+16. Industry, innovation, and infrastructure
+17. Partnership for the goals."""
 
 
 def test_keyword_prompt_keeps_typo_missing_number_and_indents():
-    p = pipeline.KEYWORD_PROMPT
-    assert p.startswith("you are AI Assitant, you have great expert in ESG,")
-    lines = p.split("\n")
-    assert lines[1] == "    Before selecting the top 5 keyword from the given list of keywords, you need to check the following:"
-    assert lines[2] == "    1. Understand the category of the keywords"
-    assert lines[5] == "    5. Understand the importance of the keywords"   # no "4."
-    assert "    4. " not in p
-    assert lines[7] == "    %1$s"
-    assert lines[9] == "    %2$s"
-    assert p.endswith('    - "keywords": A list of keywords or phrase maximum 5.')
+    # Full equality, not substrings/line-index checks — those could pass while
+    # unrelated lines drifted; this pins the whole verbatim-ported string.
+    assert pipeline.KEYWORD_PROMPT == """you are AI Assitant, you have great expert in ESG, you can select the best keyword from the list of keywords
+    Before selecting the top 5 keyword from the given list of keywords, you need to check the following:
+    1. Understand the category of the keywords
+    2. Understand the context of the keywords
+    3. Understand the relevance of the keywords
+    5. Understand the importance of the keywords
+    6. STRICTLY SELECT THE TOP 5 KEYWORDS which will be more relevant to the category of the keywords.
+    %1$s
+
+    %2$s
+    Provide the response in JSON format with the following fields:
+    - "keywords": A list of keywords or phrase maximum 5."""
 
 
 def test_qual_system_message_verbatim():
@@ -115,6 +165,23 @@ def test_qual_system_message_verbatim():
 
 
 def test_category_prompt_renders_adjective_criteria_and_text(fake):
+    # Full equality on the raw template, not substrings, so a drift in the
+    # unrendered %N$s placeholders or surrounding text can't slip through.
+    assert pipeline.CATEGORY_PROMPT == """Analyze the following text for %1$s performance. Evaluate the text based on:
+%2$s
+
+Identify the positive and negative keywords that influenced the score.
+
+Provide the response in JSON format with the following fields:
+- "reason": A Detailed explanation of the score.
+- "score": A number between 0 and 100.
+- "positive_keywords": A list of keywords or phrases that contributed positively to the score.
+- "negative_keywords": A list of keywords or phrases that reduced the score.
+- "sector": The sector of the company (e.g., technology, healthcare, finance).
+- "industry": The industry of the company (e.g., software, pharmaceuticals, banking).
+
+Text:
+%3$s"""
     pipeline.bfsi_analyze(SUBMISSION, PAGES)
     first = fake.batches[0][0]
     assert first.startswith("Analyze the following text for environmental performance. Evaluate the text based on:\n")
