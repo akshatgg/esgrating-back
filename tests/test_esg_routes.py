@@ -215,6 +215,20 @@ def test_admin_download_submission_file(admin_client, db):
     assert 'filename="report.pdf"' in resp.headers["content-disposition"]
 
 
+def test_admin_download_submission_missing_file_is_404(admin_client, db):
+    """Mirrors app/bfsi/router_admin.py's download route: a resolved-but-missing file
+    returns a clean 404, not a 500."""
+    from app.core.uploads import upload_path
+
+    sub_id = _seed_submission(db)
+    doc = db.esg_submissions.find_one({"_id": sub_id})
+    upload_path("esg", doc["file_path"]).unlink()
+
+    resp = admin_client.get(f"/api/admin/esg/submissions/{sub_id}/file")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
+
+
 # --- admin: send report ----------------------------------------------------------------
 
 def test_admin_send_without_smtp_is_503(admin_client, db):

@@ -123,7 +123,10 @@ def delete_submission(id: str, admin: str = Depends(require_admin)):
 def download_submission_file(id: str, admin: str = Depends(require_admin)):
     oid = _oid(id)
     doc = _get_submission_or_404(oid)
-    path = upload_path("esg", doc["file_path"])
+    try:
+        path = upload_path("esg", doc["file_path"])
+    except FileNotFoundError:
+        raise HTTPException(404, "Not found")
     filename = doc.get("original_filename") or doc["file_path"]
     return FileResponse(path, filename=filename)
 

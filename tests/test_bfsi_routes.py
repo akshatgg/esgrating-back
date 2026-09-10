@@ -194,7 +194,10 @@ def test_public_submit_valid_stores_document_and_notifies(client, db, monkeypatc
     assert calls[0]["to"] == [settings.team_email]
     assert calls[0]["subject"] == "BFSI ESG Submission — Acme Pvt Ltd"
     assert calls[0]["reply_to"] == "borrower@example.com"
-    assert calls[0]["attachments"][0].filename == "report.pdf"
+    # submit.php:64 attaches the stored filename (uploads/$fname), not the submitter's
+    # original "report.pdf" -- must match the stored doc's file_path.
+    assert calls[0]["attachments"][0].filename == doc["file_path"]
+    assert calls[0]["attachments"][0].filename != "report.pdf"
 
 
 def test_public_submit_rate_limited_after_five(client):
@@ -240,12 +243,20 @@ def test_admin_get_submission_invalid_id_404(admin_client):
 
 
 def test_admin_calculator_creates_no_mail_no_rate_limit(admin_client, db, monkeypatch):
+    """admin/calculator.php: same fields as the public form, no CSRF, no rate limit,
+    no mail. The route under test (POST /api/admin/bfsi/submissions) is
+    router_admin.create_submission, which never references send_mail_best_effort --
+    that symbol lives (and is only ever called) in router_public. The only mail
+    function router_admin.py imports at all is `send_mail` (used by the separate
+    /submissions/{id}/send route), so that's what we patch to boom here: it's the
+    one mail symbol actually reachable from this module, and create_submission must
+    never call it."""
     monkeypatch.setattr(jobs, "RUN_INLINE", True)
 
     def boom(*a, **kw):
         raise AssertionError("admin calculator must not send mail")
 
-    monkeypatch.setattr("app.bfsi.router_public.send_mail_best_effort", boom)
+    monkeypatch.setattr("app.bfsi.router_admin.send_mail", boom)
 
     # More than 5 submissions must all succeed -- no rate limit on the admin path.
     for _ in range(6):
@@ -275,6 +286,67 @@ def test_admin_create_record_valid(admin_client, db):
     assert doc["cin_gstin"] == "U12345MH2015PLC123456"
     assert doc["file_path"] == "" and doc["file_sha256"] == "" and doc["submit_ip"] == ""
     assert doc["answers"] == []
+
+
+def test_admin_create_record_trims_name_email_sub_sector(admin_client, db):
+    """dashboard/index.php's create_bfsi trims borrower_name, contact_email and
+    sub_sector before storing."""
+    payload = {
+        "borrower_name": "  Manual Co  ",
+        "contact_email": "  someone@example.com  ",
+        "industry": "manufacturing",
+        "sub_sector": "  Anything Free Text  ",
+        "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan",
+    }
+    resp = admin_client.post("/api/admin/bfsi/records", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inserted"] is True
+    doc = db.bfsi_submissions.find_one({"_id": ObjectId(body["id"])})
+    assert doc["borrower_name"] == "Manual Co"
+    assert doc["contact_email"] == "someone@example.com"
+    assert doc["sub_sector"] == "Anything Free Text"
+
+
+@pytest.mark.parametrize("status", [None, "", "bogus", "deleted"])
+def test_admin_create_record_invalid_status_defaults_to_new(admin_client, db, status):
+    """dashboard/index.php's create_bfsi whitelists status to
+    {new, report_generated, sent}, defaulting to "new" for anything else, including
+    a missing field."""
+    payload = {
+        "borrower_name": "Manual Co",
+        "industry": "manufacturing",
+        "sub_sector": "Anything Free Text",
+        "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan",
+    }
+    if status is not None:
+        payload["status"] = status
+    resp = admin_client.post("/api/admin/bfsi/records", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inserted"] is True
+    doc = db.bfsi_submissions.find_one({"_id": ObjectId(body["id"])})
+    assert doc["status"] == "new"
+
+
+@pytest.mark.parametrize("status", ["new", "report_generated", "sent"])
+def test_admin_create_record_valid_status_stored_as_is(admin_client, db, status):
+    payload = {
+        "borrower_name": "Manual Co",
+        "industry": "manufacturing",
+        "sub_sector": "Anything Free Text",
+        "loan_purpose": "Working Capital",
+        "loan_type": "Term Loan",
+        "status": status,
+    }
+    resp = admin_client.post("/api/admin/bfsi/records", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inserted"] is True
+    doc = db.bfsi_submissions.find_one({"_id": ObjectId(body["id"])})
+    assert doc["status"] == status
 
 
 @pytest.mark.parametrize("bad_field,bad_value", [
@@ -338,6 +410,35 @@ def test_admin_import_good_file_two_inserted_one_skipped(admin_client, db):
     assert resp.status_code == 200
     assert resp.json()["message"] == "Import complete: 2 row(s) inserted, 1 row(s) skipped."
     assert db.bfsi_submissions.count_documents({"imported": True}) == 2
+
+
+def test_admin_import_numeric_coercion_matches_php_float_cast(admin_client, db):
+    """admin/import.php casts loan_amount via PHP's (float) unconditionally -- blank or
+    garbage becomes 0.0, never null. overall_score is null only for a truly blank cell;
+    a non-blank but unparseable cell still becomes 0.0 via the same forgiving cast."""
+    rows = [
+        IMPORT_HEADER,
+        # blank loan_amount -> 0.0; blank overall_score -> None
+        "Blank Co,,,manufacturing,Textiles,,Working Capital,Term Loan,0,,,new",
+        # garbage loan_amount -> 0.0; garbage overall_score -> 0.0
+        "Garbage Co,,,manufacturing,Textiles,abc,Working Capital,Term Loan,0,xyz,,new",
+    ]
+    csv_text = "\n".join(rows) + "\n"
+
+    resp = admin_client.post(
+        "/api/admin/bfsi/import",
+        files={"file": ("numeric.csv", csv_text.encode(), "text/csv")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Import complete: 2 row(s) inserted, 0 row(s) skipped."
+
+    blank = db.bfsi_submissions.find_one({"borrower_name": "Blank Co"})
+    assert blank["loan_amount"] == 0.0
+    assert blank["overall_score"] is None
+
+    garbage = db.bfsi_submissions.find_one({"borrower_name": "Garbage Co"})
+    assert garbage["loan_amount"] == 0.0
+    assert garbage["overall_score"] == 0.0
 
 
 # --- admin: analyze ---------------------------------------------------------------------
@@ -417,6 +518,18 @@ def test_admin_download_submission_file(admin_client, db):
     assert resp.status_code == 200
     doc = db.bfsi_submissions.find_one({"_id": sub_id})
     assert f'filename="{doc["file_path"]}"' in resp.headers["content-disposition"]
+
+
+def test_admin_download_submission_missing_file_is_404(admin_client, db):
+    """download.php: a resolved-but-missing (or traversal-triggering) file returns a
+    clean 404, not a 500."""
+    sub_id = _seed_submission(db)
+    doc = db.bfsi_submissions.find_one({"_id": sub_id})
+    upload_path("bfsi", doc["file_path"]).unlink()
+
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{sub_id}/file")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not found"
 
 
 # --- admin: delete cascade ---------------------------------------------------------------

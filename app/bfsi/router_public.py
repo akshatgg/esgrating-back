@@ -62,11 +62,13 @@ async def submit_bfsi(
         if filename.lower().endswith(".pdf")
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
+    # submit.php:64 attaches the stored filename (uploads/$fname), not the submitter's
+    # original filename.
     send_mail_best_effort(
         [settings.team_email],
         subject,
         body,
         reply_to=form["contact_email"],
-        attachments=[Attachment(filename, data, mime)],
+        attachments=[Attachment(result["file"], data, mime)],
     )
     return {"ok": True, "id": result["id"]}

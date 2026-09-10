@@ -4,6 +4,7 @@
 import csv
 import io
 import math
+import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -137,18 +138,20 @@ def create_record(payload: RecordIn, admin: str = Depends(require_admin)):
         return {"inserted": False}
 
     doc = {
-        "borrower_name": payload.borrower_name,
+        "borrower_name": payload.borrower_name.strip(),
         "cin_gstin": payload.cin_gstin.strip().upper(),
-        "contact_email": payload.contact_email,
+        "contact_email": payload.contact_email.strip(),
         "industry": payload.industry,
-        "sub_sector": payload.sub_sector,
+        "sub_sector": payload.sub_sector.strip(),
         "loan_amount": payload.loan_amount,
         "outstanding_loans": payload.outstanding_loans if payload.outstanding_loans is not None else 0,
         "loan_purpose": payload.loan_purpose,
         "loan_type": payload.loan_type,
         "overall_score": payload.overall_score,
         "grade": payload.grade or None,
-        "status": payload.status or "new",
+        # dashboard/index.php's create_bfsi whitelists status to these three values,
+        # defaulting to "new" for anything else (including missing).
+        "status": payload.status if payload.status in VALID_STATUSES else "new",
         "answers": [],
         "file_path": "",
         "file_sha256": "",
@@ -163,14 +166,27 @@ def _blank_to_none(value: str) -> str | None:
     return None if value == "" else value
 
 
+def _php_float(value: str) -> float:
+    """Mimic PHP's (float) cast: parse the longest leading numeric prefix (with an
+    optional sign, decimal point, and exponent); blank or non-numeric text becomes 0.0,
+    never raises. admin/import.php casts loan_amount this way unconditionally."""
+    s = value.strip()
+    m = re.match(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?", s)
+    if not m or not m.group(0):
+        return 0.0
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return 0.0
+
+
 def _float_or_none(value: str) -> float | None:
+    """overall_score is only null for a blank cell (import.php:84); a non-blank but
+    unparseable cell still becomes 0.0 via PHP's forgiving (float) cast."""
     value = value.strip()
     if value == "":
         return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    return _php_float(value)
 
 
 @router.post("/import")
@@ -235,10 +251,10 @@ async def import_csv(file: UploadFile = File(...), admin: str = Depends(require_
             "contact_email": contact_email.strip(),
             "industry": industry,
             "sub_sector": sub_sector.strip(),
-            "loan_amount": _float_or_none(loan_amount),
+            "loan_amount": _php_float(loan_amount),
             "loan_purpose": loan_purpose,
             "loan_type": loan_type,
-            "outstanding_loans": _float_or_none(outstanding_loans) or 0,
+            "outstanding_loans": _php_float(outstanding_loans),
             "overall_score": _float_or_none(overall_score),
             "grade": _blank_to_none(grade),
             "status": status,
@@ -306,7 +322,10 @@ def delete_submission(id: str, admin: str = Depends(require_admin)):
 @router.get("/submissions/{id}/file")
 def download_submission_file(id: str, admin: str = Depends(require_admin)):
     doc = _get_submission_or_404(id)
-    path = upload_path("bfsi", doc["file_path"])
+    try:
+        path = upload_path("bfsi", doc["file_path"])
+    except FileNotFoundError:
+        raise HTTPException(404, "Not found")
     # download.php sends the stored basename, not the submitter's original filename.
     return FileResponse(path, filename=doc["file_path"], media_type="application/octet-stream")
 
