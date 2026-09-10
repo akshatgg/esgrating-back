@@ -15,6 +15,7 @@ from app.core.uploads import save_upload, upload_path
 from app.esg import store
 from app.esg.pipeline import calculate_esg_score_concurrent
 from app.mailtpl import esg_team_notice
+from app.reports.logo import delete_logo_file
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 MOBILE_RE = re.compile(r"^(\+91[\-\s]?)?[0]?(91)?[789]\d{9}$")
@@ -111,7 +112,8 @@ def run_esg_analysis(sub_id: ObjectId) -> None:
 
     year_score = store.get_esg_score(company_id)
 
-    esg_submissions_collection().update_one(
+    # A re-run starts clean: report edits and their snapshot belong to the previous result.
+    before = esg_submissions_collection().find_one_and_update(
         {"_id": sub_id},
         {"$set": {
             "final": result,
@@ -119,8 +121,10 @@ def run_esg_analysis(sub_id: ObjectId) -> None:
             "company_id": company_id,
             "status": "report_generated",
             "analyzed_at": datetime.now(timezone.utc),
-        }},
+        }, "$unset": {"report_edits": "", "report_original": ""}},
+        projection={"report_edits": 1},
     )
+    delete_logo_file(((before or {}).get("report_edits") or {}).get("logo"))
 
 
 def serialize_doc(obj):

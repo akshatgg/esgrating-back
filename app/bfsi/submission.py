@@ -13,6 +13,7 @@ from app.bfsi.pipeline import bfsi_analyze
 from app.bfsi.scoring import bfsi_overall
 from app.core.errors import UserError
 from app.core.uploads import save_upload, upload_path
+from app.reports.logo import delete_logo_file
 
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -142,7 +143,8 @@ def run_bfsi_analysis(sub_id: ObjectId) -> None:
 
     ov = bfsi_overall(ai["e_score"], ai["s_score"], ai["g_score"], sub["loan_type"])
 
-    store.submissions_collection().update_one(
+    # A re-run starts clean: report edits and their snapshot belong to the previous result.
+    before = store.submissions_collection().find_one_and_update(
         {"_id": sub_id},
         {"$set": {
             "e_score": float(ai["e_score"]),
@@ -155,7 +157,9 @@ def run_bfsi_analysis(sub_id: ObjectId) -> None:
             "text_source": extracted["source"],
             "text_truncated": extracted["truncated"],
             "status": "report_generated",
-        }},
+        }, "$unset": {"report_edits": "", "report_original": ""}},
+        projection={"report_edits": 1},
     )
+    delete_logo_file(((before or {}).get("report_edits") or {}).get("logo"))
 
     store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"])

@@ -65,6 +65,34 @@ def select_keyword(catorgory,keywords_list):
         return None
 
 
+# Extracted (zero behaviour change) from aggregate_scores and the final-report block below
+# so the report editor (app/reports/editing.py) recomputes pillar and composite scores
+# with the exact same arithmetic instead of re-implementing it.
+def round_average(total_score, count):
+    # helper.py:92 uses Python's built-in round() (banker's rounding) -- NOT php_round.
+    return round(total_score / count, 2) if count > 0 else 0
+
+
+def category_average(scores):
+    """A category's average from its per-page scores, summed in order exactly as
+    aggregate_scores sums them."""
+    total_score = 0
+    count = 0
+    for score in scores:
+        total_score += score
+        count += 1
+    return round_average(total_score, count)
+
+
+def composite_score(environmental, social, governance):
+    # Unrounded, as the original stores it.
+    return (
+        0.30 * environmental +
+        0.30 * social +
+        0.40 * governance
+    )
+
+
 # Function to aggregate scores from multiple chunks
 def aggregate_scores(score_results,category):
     total_score = 0
@@ -95,8 +123,7 @@ def aggregate_scores(score_results,category):
     most_common_keywords = ast.literal_eval(most_common_keywords)
     logger.info(most_common_keywords["keywords"])
 
-    # helper.py:92 uses Python's built-in round() (banker's rounding) -- NOT php_round.
-    return round(total_score / count, 2) if count > 0 else 0, most_common_sector, most_common_industry, most_common_keywords["keywords"]
+    return round_average(total_score, count), most_common_sector, most_common_industry, most_common_keywords["keywords"]
 
 
 def analyze_chunk(chunk: str, category: str):
@@ -230,10 +257,10 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             "environmental_score": final_scores['Environment']['score'],
             "social_score": final_scores['Social']['score'],
             "governance_score": final_scores['Governance']['score'],
-            "composite_score": (
-                0.30 * final_scores['Environment']['score'] +
-                0.30 * final_scores['Social']['score'] +
-                0.40 * final_scores['Governance']['score']
+            "composite_score": composite_score(
+                final_scores['Environment']['score'],
+                final_scores['Social']['score'],
+                final_scores['Governance']['score'],
             ),
             "sector": final_scores['Environment']['sector'].capitalize(),
             "industry": final_scores['Environment']['industry'].capitalize(),

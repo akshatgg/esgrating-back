@@ -21,6 +21,7 @@ from app.esg.router_public import router as esg_public_router
 from app.ratings.router import admin_router as ratings_admin_router
 from app.ratings.router import public_router as ratings_public_router
 from app.ratings.store import ensure_indexes as ensure_ratings_indexes
+from app.reports.router import router as reports_router
 
 
 _INSECURE_SESSION_SECRETS = {"", "dev-insecure-change-me"}
@@ -78,6 +79,7 @@ app.include_router(ratings_public_router)
 app.include_router(ratings_admin_router)
 app.include_router(contact_router)
 app.include_router(dashboard_router)
+app.include_router(reports_router)
 
 
 @app.exception_handler(UserError)
