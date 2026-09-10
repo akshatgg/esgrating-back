@@ -6,29 +6,8 @@ from bson import ObjectId
 from app.esg import llm as llm_mod
 from app.esg import pipeline, store
 from app.esg.extract import process_files
+from tests.conftest import FakeLLM
 from tests.fixtures.make_pdf import make_pdf
-
-
-class FakeLLM:
-    """Scores by category keyword in the prompt; keyword selection returns first 5."""
-    def __init__(self, scores):
-        self.scores, self.calls = scores, []
-
-    def generate_score(self, text):
-        self.calls.append(text)
-        if "STRICTLY SELECT THE TOP 5 KEYWORDS" in text:
-            return json.dumps({"keywords": ["k1", "k2", "k3", "k4", "k5"]})
-        for cat, score in self.scores.items():
-            if f"[{cat}]" in text:
-                return json.dumps({"reason": "r", "score": score, "positive_keywords": ["k1", "k2"],
-                                   "negative_keywords": ["n1"], "sector": "finance", "industry": "banking"})
-        return "An unexpected error occurred: boom"
-
-
-@pytest.fixture
-def prompts(db):
-    for cat in ("Environment", "Social", "Governance"):
-        db.esg_prompts.insert_one({"category": cat, "prompt": f"[{cat}] score this: {{text}}"})
 
 
 def test_evaluate_score_truncates():

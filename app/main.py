@@ -9,6 +9,8 @@ from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
+from app.esg.router_admin import router as esg_admin_router
+from app.esg.router_public import router as esg_public_router
 
 
 @asynccontextmanager
@@ -32,6 +34,8 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(esg_public_router)
+app.include_router(esg_admin_router)
 
 
 @app.exception_handler(UserError)
