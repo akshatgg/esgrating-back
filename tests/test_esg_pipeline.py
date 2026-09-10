@@ -50,15 +50,17 @@ def test_extract_pdf_and_docx():
 
 
 def test_full_run_scores_composite_and_persists(db, prompts, monkeypatch):
-    fake = FakeLLM({"Environment": 80, "Social": 60, "Governance": 70})
+    # Asymmetric on purpose: 0.3/0.3/0.4 gives 65.0 while a plain average gives 66.67, so an
+    # equal-weight implementation cannot pass this test.
+    fake = FakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
     final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
-    assert final["environmental_score"] == 80 and final["social_score"] == 60 and final["governance_score"] == 70
-    assert final["composite_score"] == pytest.approx(0.3 * 80 + 0.3 * 60 + 0.4 * 70)
-    # Brief expected "B+"; the original evaluate_score (helper.py:99-112) maps int(70.0)=70 to
-    # the 61..70 band -> ("B", "Good"). The source wins.
+    assert final["environmental_score"] == 90 and final["social_score"] == 60 and final["governance_score"] == 50
+    assert final["composite_score"] == pytest.approx(0.3 * 90 + 0.3 * 60 + 0.4 * 50)  # 65.0, not 66.67
+    # evaluate_score (helper.py:99-112) maps int(65.0)=65 to the 61..70 band -> ("B", "Good").
     assert final["composite_score_performance"] == "B"
+    assert final["composite_score_performance_label"] == "Good"
     assert final["sector"] == "Finance" and final["industry"] == "Banking"
     assert final["environmental_top_keywords"] == ["k1", "k2", "k3", "k4", "k5"]
     scoring_calls = [c for c in fake.calls if "score this" in c]
@@ -78,6 +80,7 @@ def test_cache_hit_returns_early_without_new_rows(db, prompts, monkeypatch):
     again = pipeline.calculate_esg_score_concurrent([("r.pdf", pdf)], c2, "2024-2025")
     assert len(fake.calls) == n_calls and again["composite_score"] == pytest.approx(50)
     assert db.esg_report.count_documents({"company_id": c2}) == 0  # quirk kept on purpose
+    assert db.esg_hashes.count_documents({}) == 1  # nothing new cached for the second company
 
 
 def test_get_esg_score_branches(db):
@@ -125,7 +128,56 @@ def test_aggregate_skips_unparseable_results(db, monkeypatch):
         ["An unexpected error occurred: boom", good, other], "Environment")
     assert avg == 75.5 and sector == "energy" and industry == "power"
     assert kws == ["k1", "k2", "k3", "k4", "k5"]
-    assert "['a', 'b']" in fake.calls[-1]  # keywords_list is repr(list) in the f-string
+    # The keyword prompt is verbatim from helper.py:38-51 (docs/analysis/esg.md A4(b)),
+    # typos ("Assitant"), the skipped "4." and the indentation included. keywords_list is
+    # the repr of the pooled positive_keywords list. Compared byte for byte on purpose.
+    expected = (
+        'you are AI Assitant, you have great expert in ESG, you can select the best keyword from the list of keywords\n'
+        '    Before selecting the top 5 keyword from the given list of keywords, you need to check the following:\n'
+        '    1. Understand the category of the keywords\n'
+        '    2. Understand the context of the keywords\n'
+        '    3. Understand the relevance of the keywords\n'
+        '    5. Understand the importance of the keywords\n'
+        '    6. STRICTLY SELECT THE TOP 5 KEYWORDS which will be more relevant to the category of the keywords.\n'
+        '    Environment\n'
+        '\n'
+        "    ['a', 'b']\n"
+        '    Provide the response in JSON format with the following fields:\n'
+        '    - "keywords": A list of keywords or phrase maximum 5.\n'
+        '\n'
+        '    '
+    )
+    assert fake.calls[-1] == expected
+
+
+def test_parser_matches_eval_accept_reject(db, monkeypatch):
+    """ast.literal_eval, not json.loads: same accept/reject set as the original eval()."""
+    fake = FakeLLM({})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    base = {"sector": "energy", "industry": "power", "positive_keywords": []}
+    # eval() raised NameError on JSON true/false/null, so the page was dropped. It must
+    # still be dropped -- json.loads would have counted it.
+    literals = json.dumps({"score": 10, "verified": True, "note": None, **base})
+    # eval() accepted Python repr output (single quotes); json.loads would reject it.
+    py_repr = repr({"score": 90, **base})
+    avg, _, _, _ = pipeline.aggregate_scores([literals, py_repr], "Environment")
+    assert avg == 90
+
+
+def test_all_scoring_failed_is_not_stored_or_cached(db, prompts, monkeypatch):
+    class DeadLLM:  # a revoked key: every call, keyword selection included, errors out
+        def generate_score(self, text):
+            return "An unexpected error occurred: Error code: 401 - invalid_api_key"
+
+    monkeypatch.setattr(llm_mod, "get_llm", DeadLLM)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["t"]))], cid, "2024-2025")
+    assert out == {
+        "status": "error",
+        "message": "No valid ESG score could be computed — the AI scoring failed for "
+                   "every page (check the OpenAI key/quota).",
+    }
+    assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 
 
 def test_no_text_returns_status_error(db):

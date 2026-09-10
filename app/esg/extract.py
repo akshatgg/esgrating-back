@@ -1,11 +1,13 @@
 # Port of esg_score_calculator-master/utils/read_content_utils.py.
-# Divergences (approved): PyPDF2 -> pypdf; inputs are (filename, bytes) tuples instead of
-# starlette UploadFiles; DOCX yields one page instead of extending the list with characters.
+# Divergences (approved): inputs are (filename, bytes) tuples instead of starlette
+# UploadFiles; DOCX yields one page instead of extending the list with characters.
 # scrape_website is dropped (unreachable: /add_user only ever passed UploadFiles).
+# PyPDF2 is pinned to 3.0.1 (pyproject.toml) -- the version unpinned production resolves
+# to -- so page text and the sha256 cache hash match production exactly.
 import io
 import logging
 
-import pypdf
+from PyPDF2 import PdfReader
 from docx import Document
 
 logger = logging.getLogger(__name__)
@@ -15,7 +17,7 @@ logger = logging.getLogger(__name__)
 def extract_text_from_pdf(file):
     text_with_pages = []
     try:
-        reader = pypdf.PdfReader(file)
+        reader = PdfReader(file)
         logger.info(f"Number of pages: {len(reader.pages)}")
         for page_no, page in enumerate(reader.pages, start=1):
             text = page.extract_text() or ""

@@ -1,12 +1,15 @@
 # Port of esg_score_calculator-master/utils/helper.py, line for line.
-# Divergences (approved): json.loads instead of eval (failures still skipped); the LLM comes
-# from llm_mod.get_llm() (model from settings); inputs are (filename, bytes) tuples.
+# Divergences (approved): ast.literal_eval instead of eval (failures still skipped); the LLM
+# comes from llm_mod.get_llm() (model from settings); inputs are (filename, bytes) tuples.
+# ast.literal_eval accepts and rejects exactly what eval did for this output (JSON's
+# true/false/null still skip the chunk), so scores match production; json.loads would not.
 # Added: prompts are checked before the fan-out so a missing esg_prompts doc fails the run
-# loudly (spec) instead of silently scoring that category 0. check_old_composite_score is
+# loudly (spec) instead of silently scoring that category 0; a run where every category
+# failed to score is neither stored nor cached (spec). check_old_composite_score is
 # dropped (unused in the original).
+import ast
 import concurrent.futures
 import hashlib
-import json
 import logging
 from collections import Counter
 from datetime import datetime
@@ -71,7 +74,7 @@ def aggregate_scores(score_results,category):
     postive_keywords = []
     for result in score_results:
         try:
-            parsed_result = json.loads(result)
+            parsed_result = ast.literal_eval(result)
             score = parsed_result.get("score", 0)
             sector = parsed_result.get("sector", "")
             industry = parsed_result.get("industry", "")
@@ -89,7 +92,7 @@ def aggregate_scores(score_results,category):
     most_common_sector = Counter(sectors).most_common(1)[0][0] if sectors else ""
     most_common_industry = Counter(industries).most_common(1)[0][0] if industries else ""
     most_common_keywords = select_keyword(category,postive_keywords)
-    most_common_keywords = json.loads(most_common_keywords)
+    most_common_keywords = ast.literal_eval(most_common_keywords)
     logger.info(most_common_keywords["keywords"])
 
     return round(total_score / count, 2) if count > 0 else 0, most_common_sector, most_common_industry, most_common_keywords["keywords"]
@@ -238,6 +241,25 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             "governance_top_keywords": final_scores['Governance']['positive_keywords'],
             "report_date": datetime.now().strftime('%Y-%m-%d')
         }
+
+        # Breakage (spec): if every category failed to score anything, the LLM never worked
+        # (revoked key, no quota, ...). The aggregation except-path is what sets sector and
+        # industry to "unknown", so an all-zero report with "Unknown" sector AND industry
+        # means "nothing was scored", not "legitimately scored 0". Store nothing and cache
+        # nothing -- the original cached these zeros in esg_hashes permanently.
+        if (
+            final_report_data["environmental_score"] == 0
+            and final_report_data["social_score"] == 0
+            and final_report_data["governance_score"] == 0
+            and final_report_data["sector"] == "Unknown"
+            and final_report_data["industry"] == "Unknown"
+        ):
+            logger.error("Every ESG scoring call failed; not storing or caching the report.")
+            return {
+                "status": "error",
+                "message": "No valid ESG score could be computed — the AI scoring failed for "
+                           "every page (check the OpenAI key/quota).",
+            }
 
         # Evaluate score performance
         for key in ['environmental', 'social', 'governance', 'composite']:

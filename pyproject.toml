@@ -11,7 +11,9 @@ dependencies = [
     "openai>=1.40",
     "pydantic-settings>=2.15.0",
     "pymongo>=4.8,<5",
-    "pypdf>=6.18.0",
+    # Pinned to the version an unpinned production install resolves to, so extracted page
+    # text -- and therefore the sha256 cache hash -- stays identical to production.
+    "PyPDF2==3.0.1",
     "python-docx>=1.2.0",
     "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.52.4",
@@ -29,4 +31,8 @@ filterwarnings = [
     # Upstream starlette 1.6.0 TestClient still references the deprecated
     # anyio.abc.BlockingPortal alias; nothing in our code to fix.
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+    # PyPDF2 3.0.1 warns on import that it is superseded by pypdf. The pin is deliberate
+    # (see pyproject dependencies): it keeps page text and the sha256 cache hash identical
+    # to production. Nothing to fix here.
+    "ignore:PyPDF2 is deprecated:DeprecationWarning:PyPDF2",
 ]
