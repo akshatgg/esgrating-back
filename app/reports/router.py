@@ -1,10 +1,11 @@
 # app/reports/router.py -- editable ESG/BFSI reports
 # (docs/specs/2026-09-10-editable-reports-design.md). Every route is admin-only.
+import json
 import re
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.auth.deps import require_admin
@@ -19,7 +20,12 @@ router = APIRouter(prefix="/api/admin", tags=["admin-reports"])
 MAX_EDITS_BODY_BYTES = 512 * 1024
 NOT_READY = "Run the analysis before editing the report."
 RUNNING = "The analysis is running. Wait for it to finish before editing the report."
+TOO_LARGE = "The edits are too large."
 _ID_RE = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
+
+# The report_edits sub-fields a PUT owns. It sets (or unsets) exactly these, never the
+# whole report_edits object, so a logo uploaded while the PUT was in flight survives.
+_CONTENT_KEYS = ("headings", "fields", "page_scores", "pillar_overrides")
 
 
 def _collection(kind: str):
@@ -51,18 +57,45 @@ def _not_running(doc: dict) -> None:
         raise HTTPException(409, RUNNING)
 
 
-def _check_size(request: Request) -> None:
+async def edits_body(request: Request) -> dict:
+    """The JSON edits body, read with a hard byte cap. Content-Length is only a fast
+    path: the stream itself is counted, so a chunked (length-less) body can't get past
+    the limit either."""
     length = request.headers.get("content-length", "")
     if length.isdigit() and int(length) > MAX_EDITS_BODY_BYTES:
-        raise HTTPException(413, "The edits are too large.")
+        raise HTTPException(413, TOO_LARGE)
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_EDITS_BODY_BYTES:
+            raise HTTPException(413, TOO_LARGE)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        raise HTTPException(422, "The edits must be valid JSON.")
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "The edits must be a JSON object.")
+    return payload
 
 
 def _apply(col, doc: dict, update: dict) -> None:
     """Write unless an analysis run has claimed the submission since we read it."""
     update = {op: fields for op, fields in update.items() if fields}
+    if not update:
+        return
     result = col.update_one({"_id": doc["_id"], "analysis_status": {"$ne": "running"}}, update)
     if result.matched_count == 0:
         raise HTTPException(409, RUNNING)
+
+
+def _drop_empty_edits(col, doc: dict) -> None:
+    """Remove a report_edits left with neither content nor a logo (only bookkeeping).
+    Conditional in the filter, so a concurrent logo upload or content save is kept."""
+    col.update_one(
+        {"_id": doc["_id"], "report_edits.logo": {"$in": [None]},
+         **{f"report_edits.{k}": {"$exists": False} for k in _CONTENT_KEYS}},
+        {"$unset": {"report_edits": ""}},
+    )
 
 
 def _logo_name(doc: dict) -> str | None:
@@ -83,6 +116,7 @@ def _report(kind: str, doc: dict) -> dict:
         "original": original,
         "edits": edits,
         "pages": result["pages"],
+        "pages_editable": ctx["pages_editable"],
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
@@ -96,42 +130,43 @@ def get_report(kind: str, id: str, admin: str = Depends(require_admin)):
 
 
 @router.post("/{kind}/submissions/{id}/report/preview")
-def preview_report(kind: str, id: str, request: Request, payload: dict = Body(...),
+def preview_report(kind: str, id: str, payload: dict = Depends(edits_body),
                    admin: str = Depends(require_admin)):
     """Recompute with the given edits. Never saves."""
-    _check_size(request)
     _col, doc = _load(kind, id)
     ctx = editing.load_context(kind, doc)
     edits = editing.normalize_edits(kind, payload, ctx)
     result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc))
-    return serialize_doc({"effective": result["effective"], "pages": result["pages"]})
+    return serialize_doc({
+        "effective": result["effective"],
+        "pages": result["pages"],
+        "pages_editable": ctx["pages_editable"],
+    })
 
 
 @router.put("/{kind}/submissions/{id}/report/edits")
-def save_edits(kind: str, id: str, request: Request, payload: dict = Body(...),
+def save_edits(kind: str, id: str, payload: dict = Depends(edits_body),
                admin: str = Depends(require_admin)):
-    _check_size(request)
     col, doc = _load(kind, id)
     _not_running(doc)
     ctx = editing.load_context(kind, doc)
     edits = editing.normalize_edits(kind, payload, ctx)
-    logo = _logo_name(doc)
-    record = {**edits, "logo": logo, "updated_at": datetime.now(timezone.utc), "updated_by": admin}
+    meta = {"report_edits.updated_at": datetime.now(timezone.utc), "report_edits.updated_by": admin}
 
     if editing.edits_have_content(edits):
         stored = editing.compute(kind, doc, ctx, edits)["stored"]
-        update = {"$set": {**stored, "report_edits": record}}
+        update = {"$set": {**stored, **meta, **{f"report_edits.{k}": edits[k] for k in _CONTENT_KEYS}}}
         if not doc.get("report_original"):
             update["$set"]["report_original"] = ctx["base"]  # snapshot on first save
+        _apply(col, doc, update)
     else:
         # Nothing edited (besides maybe the logo): same as a reset of the report fields.
+        # Only the content sub-fields go; the logo is left exactly as it is now.
         update = editing.restore_update(kind, ctx["base"])
         update["$unset"]["report_original"] = ""
-        if logo:
-            update["$set"]["report_edits"] = record
-        else:
-            update["$unset"]["report_edits"] = ""
-    _apply(col, doc, update)
+        update["$unset"].update({f"report_edits.{k}": "" for k in _CONTENT_KEYS})
+        _apply(col, doc, update)
+        _drop_empty_edits(col, doc)
     return _report(kind, _reload(col, doc))
 
 
@@ -153,13 +188,18 @@ def reset_edits(kind: str, id: str, admin: str = Depends(require_admin)):
 @router.post("/{kind}/submissions/{id}/report/logo")
 async def upload_logo(kind: str, id: str, logo: UploadFile = File(...), admin: str = Depends(require_admin)):
     col, doc = _load(kind, id)
+    _not_running(doc)
     data = await read_limited(logo, MAX_LOGO_BYTES, "The logo must be 1 MB or smaller.")
     name = save_logo(data)  # magic-byte checked: PNG / JPEG / WebP only
-    col.update_one({"_id": doc["_id"]}, {"$set": {
-        "report_edits.logo": name,
-        "report_edits.updated_at": datetime.now(timezone.utc),
-        "report_edits.updated_by": admin,
-    }})
+    try:
+        _apply(col, doc, {"$set": {
+            "report_edits.logo": name,
+            "report_edits.updated_at": datetime.now(timezone.utc),
+            "report_edits.updated_by": admin,
+        }})
+    except HTTPException:
+        delete_logo_file(name)  # an analysis claimed the submission meanwhile
+        raise
     old = _logo_name(doc)
     if old and old != name:
         delete_logo_file(old)
@@ -188,11 +228,10 @@ def remove_logo(kind: str, id: str, admin: str = Depends(require_admin)):
     """Back to the default logo. (Not in the spec's table: the "use default logo" control
     needs it, and PUT deliberately never touches the logo.)"""
     col, doc = _load(kind, id)
+    _not_running(doc)
     name = _logo_name(doc)
     if name:
-        if editing.edits_have_content(doc.get("report_edits")):
-            col.update_one({"_id": doc["_id"]}, {"$unset": {"report_edits.logo": ""}})
-        else:
-            col.update_one({"_id": doc["_id"]}, {"$unset": {"report_edits": ""}})
+        _apply(col, doc, {"$unset": {"report_edits.logo": ""}})
+        _drop_empty_edits(col, doc)
         delete_logo_file(name)
     return _report(kind, _reload(col, doc))

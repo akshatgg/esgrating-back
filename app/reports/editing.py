@@ -41,6 +41,12 @@ _SHEET_HEADINGS = [
     "esg_rating_report", "rating_summary", "result", "score_summary", "esg_score",
     "env_kpis", "soc_kpis", "gov_kpis", "sebi_line",
 ]
+# BFSI renders both the detailed report and the one-pager (the ESG-style sheet), and
+# both have a "Rating Summary" heading: the one-pager's gets its own key so editing
+# one never renames the other. Every other key is used by exactly one BFSI sheet.
+_BFSI_ONEPAGER_HEADINGS = [
+    "onepager_rating_summary" if k == "rating_summary" else k for k in _SHEET_HEADINGS
+]
 
 
 def _unique(items):
@@ -48,8 +54,7 @@ def _unique(items):
 
 
 HEADING_KEYS = {
-    # BFSI renders both the detailed report and the one-pager (the ESG-style sheet).
-    "bfsi": _unique(_DETAILED_HEADINGS + _SHEET_HEADINGS),
+    "bfsi": _unique(_DETAILED_HEADINGS + _BFSI_ONEPAGER_HEADINGS),
     # ESG renders the sheet, plus the page-scores panel and the score scale.
     "esg": _unique(_SHEET_HEADINGS + ["report_title", "scoring_rationale", "score_scale"]),
 }
@@ -72,6 +77,8 @@ FIELD_SPECS = {
     },
 }
 FIELD_KEYS = {kind: list(spec) for kind, spec in FIELD_SPECS.items()}
+
+PAGES_LOCKED = "Page scores can't be edited for this pillar; edit the pillar score instead."
 
 HEADING_MAX = 200
 SHORT_MAX = 200
@@ -158,8 +165,18 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
     out = empty_edits()
     pages = ctx["pages"]
     page_keys = {c: {str(p["page"]) for p in pages[c]} for c in CATS}
-    original_by_key = {c: {str(p["page"]): p["score"] for p in pages[c]} for c in CATS}
+    # Page overrides are keyed by page number. A number can repeat (BFSI splits a long
+    # page into several scoring units; ESG page_no can repeat): the override then
+    # applies to every row with that number, so it is only a no-op when it equals the
+    # AI score of all of them.
+    originals_by_key = {c: {} for c in CATS}
+    for c in CATS:
+        for p in pages[c]:
+            originals_by_key[c].setdefault(str(p["page"]), []).append(p["score"])
 
+    # Empty text (after strip) and empty lists are "no override": the key is dropped,
+    # so the report falls back to the AI value (and the BFSI recommendation keeps
+    # following the grade) instead of showing a blank.
     for key, value in _as_dict(payload.get("headings"), "headings").items():
         if key not in HEADING_KEYS[kind]:
             raise UserError(f"Unknown heading: {key}")
@@ -174,16 +191,22 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
             raise UserError(f"Unknown field: {key}")
         if value is None:
             continue
-        if spec == _SHORT:
-            out["fields"][key] = _text(value, f"Field {key!r}", SHORT_MAX)
-        elif spec == _LONG:
-            out["fields"][key] = _text(value, f"Field {key!r}", LONG_MAX, multiline=True)
+        if spec in (_SHORT, _LONG):
+            text = _text(value, f"Field {key!r}", SHORT_MAX if spec == _SHORT else LONG_MAX,
+                         multiline=spec == _LONG)
+            if text != "":
+                out["fields"][key] = text
         elif spec == _LIST:
-            out["fields"][key] = _text_list(value, f"Field {key!r}")
+            items = _text_list(value, f"Field {key!r}")
+            if items:
+                out["fields"][key] = items
         elif spec == _CATLISTS:
             cats = {}
             for cat, items in _as_dict(value, f"Field {key!r}").items():
-                cats[_cat(cat, f"Field {key!r}")] = _text_list(items, f"Field {key}.{cat}")
+                cat = _cat(cat, f"Field {key!r}")
+                items = _text_list(items, f"Field {key}.{cat}")
+                if items:
+                    cats[cat] = items
             if cats:
                 out["fields"][key] = cats
         elif spec == _REASONS:
@@ -194,7 +217,9 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                 for page, text in _as_dict(texts, f"reasons.{cat}").items():
                     if str(page) not in page_keys[cat]:
                         raise UserError(f"reasons.{cat}: page {page} is not in this report.")
-                    per_page[str(page)] = _text(text, f"Reason for {cat} page {page}", LONG_MAX, multiline=True)
+                    text = _text(text, f"Reason for {cat} page {page}", LONG_MAX, multiline=True)
+                    if text != "":
+                        per_page[str(page)] = text
                 if per_page:
                     cats[cat] = per_page
             if cats:
@@ -202,15 +227,18 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
 
     for cat, scores in _as_dict(payload.get("page_scores"), "page_scores").items():
         _cat(cat, "page_scores")
-        for page, value in _as_dict(scores, f"page_scores.{cat}").items():
+        scores = _as_dict(scores, f"page_scores.{cat}")
+        if scores and not ctx["pages_editable"][cat]:
+            raise UserError(PAGES_LOCKED)
+        for page, value in scores.items():
             page = str(page)
             if page not in page_keys[cat]:
                 raise UserError(f"page_scores.{cat}: page {page} is not in this report.")
             value = _score(value, f"Score for {cat} page {page}")
-            original = original_by_key[cat][page]
             # An "override" equal to the AI's own score is no override: dropping it keeps
             # the pillar at its exact stored value instead of a recomputed average.
-            if original is not None and float(original) == value:
+            originals = originals_by_key[cat][page]
+            if all(o is not None and float(o) == value for o in originals):
                 continue
             out["page_scores"][cat][page] = value
 
@@ -353,9 +381,38 @@ def _pages(kind: str, doc: dict, base: dict) -> dict:
     return pages
 
 
+def _same(a, b) -> bool:
+    return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(float(a) - float(b)) < 1e-9
+
+
+def _pages_editable(kind: str, base: dict, pages: dict) -> dict:
+    """Per category: does the page list reproduce the stored pillar score?
+
+    Recomputing a pillar from edited pages is only sound when the unedited pages
+    average to exactly what the analysis stored. That is not guaranteed:
+      - BFSI: bfsi_analyze averages every scored unit, but `reasons` (our page list)
+        keeps only the units that came back with a non-empty reason.
+      - ESG: the page list comes from the matching esg_report run, which can be missing
+        or belong to a different run.
+    When the averages differ, the category's pages are read-only (the pillar score can
+    still be overridden directly)."""
+    out = {}
+    for cat in CATS:
+        scores = [p["score"] for p in pages[cat]]
+        if kind == "esg":
+            stored = base.get(f"{ESG_PREFIX[cat]}_score")
+            average = category_average([s for s in scores if s is not None])
+        else:
+            stored = base.get(BFSI_SCORE_KEY[cat])
+            average = avg_scores([{"score": s} for s in scores])
+        out[cat] = bool(pages[cat]) and _same(average, stored)
+    return out
+
+
 def load_context(kind: str, doc: dict) -> dict:
     base = copy.deepcopy(doc["report_original"]) if doc.get("report_original") else snapshot(kind, doc)
-    return {"base": base, "pages": _pages(kind, doc, base)}
+    pages = _pages(kind, doc, base)
+    return {"base": base, "pages": pages, "pages_editable": _pages_editable(kind, base, pages)}
 
 
 # --- effective computation -----------------------------------------------------------------
