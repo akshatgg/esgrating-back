@@ -11,6 +11,9 @@ dependencies = [
     "openai>=1.40",
     "pydantic-settings>=2.15.0",
     "pymongo>=4.8,<5",
+    # BFSI keeps pypdf (its original PHP port used Smalot\PdfParser; pypdf is the Python
+    # equivalent). This is a separate package from PyPDF2 below -- no conflict.
+    "pypdf>=6",
     # Pinned to the version an unpinned production install resolves to, so extracted page
     # text -- and therefore the sha256 cache hash -- stays identical to production.
     "PyPDF2==3.0.1",
