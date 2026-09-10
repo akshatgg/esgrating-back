@@ -6,11 +6,16 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.errors import UserError
+from app.core.jobs import reset_interrupted_jobs
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        reset_interrupted_jobs()
+    except Exception:
+        pass
     yield
 
 
