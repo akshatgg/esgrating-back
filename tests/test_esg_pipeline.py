@@ -180,6 +180,28 @@ def test_all_scoring_failed_is_not_stored_or_cached(db, prompts, monkeypatch):
     assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 
 
+def test_partial_failure_with_empty_sector_is_not_stored_or_cached(db, prompts, monkeypatch):
+    # Every scoring call fails, but the keyword-selection call (no category marker in the
+    # prompt) succeeds -- aggregate_scores then returns early with sector/industry == ""
+    # (not "Unknown", which only happens via the except-path). This is the partial-failure
+    # case the widened guard must also catch.
+    class PartialFailLLM:
+        def generate_score(self, text):
+            if "STRICTLY SELECT THE TOP 5 KEYWORDS" in text:
+                return json.dumps({"keywords": []})
+            return "An unexpected error occurred: Error code: 401 - invalid_api_key"
+
+    monkeypatch.setattr(llm_mod, "get_llm", PartialFailLLM)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["t"]))], cid, "2024-2025")
+    assert out == {
+        "status": "error",
+        "message": "No valid ESG score could be computed — the AI scoring failed for "
+                   "every page (check the OpenAI key/quota).",
+    }
+    assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
+
+
 def test_no_text_returns_status_error(db):
     out = pipeline.calculate_esg_score_concurrent([("r.txt", b"hello")], ObjectId(), "2024-2025")
     assert out == {"status": "error", "message": "No text extracted from the input file or URL."}

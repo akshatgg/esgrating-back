@@ -243,16 +243,20 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
         }
 
         # Breakage (spec): if every category failed to score anything, the LLM never worked
-        # (revoked key, no quota, ...). The aggregation except-path is what sets sector and
-        # industry to "unknown", so an all-zero report with "Unknown" sector AND industry
-        # means "nothing was scored", not "legitimately scored 0". Store nothing and cache
-        # nothing -- the original cached these zeros in esg_hashes permanently.
+        # (revoked key, no quota, ...). The aggregation except-path sets sector/industry to
+        # "unknown" ("Unknown" after capitalize()); but when scoring calls fail while the
+        # separate keyword-selection call still succeeds, aggregate_scores returns early
+        # with sector/industry as "" instead (no exception raised, so "unknown" is never
+        # set) -- capitalize() leaves "" as "". Either way an all-zero report with no real
+        # sector/industry means "nothing was scored", not "legitimately scored 0". Store
+        # nothing and cache nothing -- the original cached these zeros in esg_hashes
+        # permanently.
         if (
             final_report_data["environmental_score"] == 0
             and final_report_data["social_score"] == 0
             and final_report_data["governance_score"] == 0
-            and final_report_data["sector"] == "Unknown"
-            and final_report_data["industry"] == "Unknown"
+            and final_report_data["sector"] in ("", "Unknown")
+            and final_report_data["industry"] in ("", "Unknown")
         ):
             logger.error("Every ESG scoring call failed; not storing or caching the report.")
             return {
