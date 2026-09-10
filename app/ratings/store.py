@@ -26,21 +26,21 @@ def _matches(doc: dict, pattern: re.Pattern) -> bool:
     return any(pattern.search(str(doc.get(f, ""))) for f in FIELDS)
 
 
-def _filtered(q: str) -> list[dict]:
-    docs = list(ratings_collection().find({}, {"_id": 0}).sort("s_no", -1))
+def search_page(q: str, skip: int, limit: int) -> tuple[list[dict], int]:
+    """One pass: return (page of items, total matching). Empty search skips
+    in-Python filtering entirely and does the count + page directly in Mongo."""
     q = (q or "").strip()
     if not q:
-        return docs
+        total = ratings_collection().count_documents({})
+        items = list(
+            ratings_collection().find({}, {"_id": 0}).sort("s_no", -1).skip(skip).limit(limit)
+        )
+        return items, total
+
     pattern = re.compile(re.escape(q), re.IGNORECASE)
-    return [d for d in docs if _matches(d, pattern)]
-
-
-def search_ratings(q: str, skip: int, limit: int) -> list[dict]:
-    return _filtered(q)[skip:skip + limit]
-
-
-def count_search(q: str) -> int:
-    return len(_filtered(q))
+    docs = list(ratings_collection().find({}, {"_id": 0}).sort("s_no", -1))
+    matched = [d for d in docs if _matches(d, pattern)]
+    return matched[skip:skip + limit], len(matched)
 
 
 def next_s_no() -> int:

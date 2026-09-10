@@ -79,8 +79,7 @@ class RatingIn(BaseModel):
 @admin_router.get("")
 def admin_list(search: str = "", page: int = 1, admin: str = Depends(require_admin)):
     page = max(page, 1)
-    total = store.count_search(search)
-    items = store.search_ratings(search, (page - 1) * PAGE_SIZE, PAGE_SIZE)
+    items, total = store.search_page(search, (page - 1) * PAGE_SIZE, PAGE_SIZE)
     pages = math.ceil(total / PAGE_SIZE) if total else 0
     return {"items": items, "total": total, "page": page, "pages": pages}
 
@@ -124,8 +123,6 @@ async def import_csv(file: UploadFile = File(...), admin: str = Depends(require_
     inserted, skipped = 0, 0
     docs = []
     for row in reader:
-        if not row:
-            continue
         if len(row) < 6:
             skipped += 1
             continue
