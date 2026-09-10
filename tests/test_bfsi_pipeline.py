@@ -150,6 +150,8 @@ def test_pool_dedupes_first_seen_and_caps():
     results = [{"k": ["b", "a", " b "]}, {"k": ["c", "", "d"]}, {"k": ["e", "f"]}]
     assert pipeline.pool(results, "k", 5) == ["b", "a", "c", "d", "e"]
     assert pipeline.pool(results, "missing", 5) == []
+    # PHP (array) cast: a scalar or an object still yields keywords
+    assert pipeline.pool([{"k": "solo"}, {"k": {"x": "obj"}}, {"k": None}], "k", 5) == ["solo", "obj"]
 
 
 def test_modal_is_ucfirst_lowercased_most_common():
@@ -227,6 +229,9 @@ def test_reason_entries_carry_page_and_null_score(monkeypatch):
     use(monkeypatch, FakeClient(responder=responder))
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
     assert out["reasons"]["E"] == [{"page": 1, "score": None, "reason": "spaced"}]   # blank reason dropped
+    # a page that arrived without a page_no casts to 0, as PHP's (int)null does
+    out = pipeline.bfsi_analyze(SUBMISSION, [{"text": "alpha"}])
+    assert out["reasons"]["E"] == [{"page": 0, "score": None, "reason": "spaced"}]
 
 
 def test_failed_units_are_dropped_from_the_average(monkeypatch):

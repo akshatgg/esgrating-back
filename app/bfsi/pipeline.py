@@ -216,8 +216,12 @@ def pool(results: list, field: str, limit: int = 5) -> list[str]:
     """Pool a list-valued field across chunk results, dedupe, cap at limit."""
     all_kw = []
     for r in results:
-        value = r.get(field) or []
-        if not isinstance(value, (list, tuple)):
+        value = r.get(field)
+        if value is None:             # PHP ?? []
+            value = []
+        elif isinstance(value, dict):
+            value = list(value.values())
+        elif not isinstance(value, (list, tuple)):
             value = [value]           # PHP (array) cast of a scalar
         for k in value:
             k = _s(k).strip(_PHP_TRIM)
@@ -295,14 +299,15 @@ def bfsi_analyze(submission: dict, pages: list) -> dict:
             if text == "":
                 continue
             reasons[cat].append({
-                "page": int(r["page_no"]),
+                # PHP (int) cast: a page that arrived without a usable page_no is 0.
+                "page": int(float(r["page_no"])) if _is_numeric(r["page_no"]) else 0,
                 "score": float(r["score"]) if _is_numeric(r.get("score")) else None,
                 "reason": text,
             })
         all_results.extend(results)
 
     # qualitative pass on a condensed digest (first ~6000 words)
-    joined = " ".join(p["text"] for p in pages if "text" in p)
+    joined = " ".join(_s(p["text"]) for p in pages if "text" in p)
     # No trim and no NO_EMPTY flag here, matching the PHP: leading whitespace yields an
     # empty first "word", which counts against the 6000.
     digest = " ".join(_PHP_WS.split(joined)[:6000])
