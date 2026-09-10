@@ -1,0 +1,32 @@
+[project]
+name = "esgratings-api"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "fastapi>=0.141",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "openai>=1.40",
+    "pydantic-settings>=2.15.0",
+    "pymongo>=4.8,<5",
+    "pypdf>=6.18.0",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.32",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[dependency-groups]
+dev = [
+    "fpdf2>=2.8.8",
+    "mongomock>=4.3.0",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # Upstream starlette 1.6.0 TestClient still references the deprecated
+    # anyio.abc.BlockingPortal alias; nothing in our code to fix.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+]
