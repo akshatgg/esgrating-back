@@ -3,6 +3,7 @@
 # BFSI_ANSWER_POINTS are dead code in the PHP source (unused questionnaire step)
 # and are intentionally not ported.
 from app.bfsi.options import LOANTYPE_TO_WEIGHTAGE, WEIGHTAGE
+from app.core.rounding import php_round
 
 # Grade -> label, in ladder order. Used for the ladder itself and for labelling
 # the per-category (E/S/G) grade column in reports.
@@ -45,7 +46,7 @@ def bfsi_recommendation(grade: str) -> str:
 def bfsi_overall(e: float, s: float, g: float, loan_type: str) -> dict:
     row = LOANTYPE_TO_WEIGHTAGE.get(loan_type, "Working Capital")
     w = WEIGHTAGE[row]
-    overall = round((w["e"] * e + w["s"] * s + w["g"] * g) / 100, 2)
+    overall = php_round((w["e"] * e + w["s"] * s + w["g"] * g) / 100, 2)
     gr = bfsi_grade(overall)
     return {
         "overall": overall,

@@ -14,6 +14,7 @@ import logging
 from collections import Counter
 from datetime import datetime
 
+from app.core.rounding import php_round
 from app.esg import llm as llm_mod
 from app.esg.extract import process_files, split_text_into_chunks
 from app.esg.store import insert_esg_collection, store_llm_response, get_llm_response, read_prompt
@@ -95,7 +96,7 @@ def aggregate_scores(score_results,category):
     most_common_keywords = ast.literal_eval(most_common_keywords)
     logger.info(most_common_keywords["keywords"])
 
-    return round(total_score / count, 2) if count > 0 else 0, most_common_sector, most_common_industry, most_common_keywords["keywords"]
+    return php_round(total_score / count, 2) if count > 0 else 0, most_common_sector, most_common_industry, most_common_keywords["keywords"]
 
 
 def analyze_chunk(chunk: str, category: str):
