@@ -98,10 +98,16 @@ def test_public_submit_missing_file(client):
 
 
 def test_public_submit_file_too_large(client):
-    big = b"%PDF" + b"0" * (5 * 1024 * 1024 + 1)
+    big = b"%PDF" + b"0" * (20 * 1024 * 1024 + 1)
     resp = client.post("/api/esg/submissions", data=VALID_FORM, files={"file": ("report.pdf", big, "application/pdf")})
     assert resp.status_code == 422
     assert resp.json()["detail"] == "The uploaded file is too large."
+
+
+def test_public_submit_accepts_file_over_old_5mb_limit(client):
+    report = b"%PDF" + b"0" * (6 * 1024 * 1024)
+    resp = client.post("/api/esg/submissions", data=VALID_FORM, files={"file": ("report.pdf", report, "application/pdf")})
+    assert resp.status_code == 201
 
 
 def test_public_submit_disallowed_extension(client):

@@ -23,7 +23,7 @@ REPORT_YEAR_RE = re.compile(r"^\d{4}-\d{4}$")
 
 REQUIRED_FIELDS = ("name", "email", "designation", "company_name", "mobile_number", "report_year")
 
-MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_FILE_BYTES = 20 * 1024 * 1024
 ALLOWED_EXTENSIONS = {
     "pdf": b"%PDF",
     "docx": b"PK",
