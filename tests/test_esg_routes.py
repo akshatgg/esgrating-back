@@ -77,6 +77,28 @@ def test_public_submit_invalid_email(client):
     assert resp.json()["detail"] == "Please enter a valid email"
 
 
+@pytest.mark.parametrize("number", [
+    "+14155552671",        # US
+    "+44 7911 123456",     # UK, spaces
+    "+971501234567",       # UAE
+    "+49 (30) 1234-5678",  # Germany, brackets and dash
+    "+91 9876543210",      # India with country code
+    "9876543210",          # India, bare 10 digits
+])
+def test_public_submit_accepts_international_mobile(client, number):
+    form = {**VALID_FORM, "mobile_number": number}
+    resp = client.post("/api/esg/submissions", data=form, files=_pdf_file())
+    assert resp.status_code == 201
+
+
+@pytest.mark.parametrize("number", ["12345", "abcdefghij", "+12345678901234567", "++919876543210"])
+def test_public_submit_rejects_bad_mobile(client, number):
+    form = {**VALID_FORM, "mobile_number": number}
+    resp = client.post("/api/esg/submissions", data=form, files=_pdf_file())
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Please enter a valid phone number"
+
+
 def test_public_submit_invalid_mobile(client):
     form = {**VALID_FORM, "mobile_number": "12345"}
     resp = client.post("/api/esg/submissions", data=form, files=_pdf_file())
