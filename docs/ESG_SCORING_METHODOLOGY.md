@@ -56,7 +56,21 @@ Grade
 | 40–60 | C Average |
 | Below 40 | D Below Average |
 
-Environment has 18 KPIs, Social 18 and Governance 17. Admins can add KPIs without changing the code.
+## Where the KPIs come from
+
+The KPIs come from our ESG metrics sheet, stored in the database (`esg_kpis`). Each metric sits in a group:
+
+**Pillar → Sub Pillar → Sub Pillar 1 → Metric**, for example **E → Water → Water II → Water withdrawn**.
+
+| Pillar | Metrics scored | Sub Pillars |
+|---|---|---|
+| Environment | 125 | Emission, Environmental Management, Environmental Solution, Environmental Stewardship, Resource Use, Waste, Water |
+| Social | 129 | Community Relations, Diversity, Compensation, Employment Quality, Human Rights, Labour Rights, OHS, Product Access, Product Quality & Safety, Training & Development |
+| Governance | 82 | Business Ethics, Compensation, Diversity, Governance, Transparency |
+
+- The AI gets each metric **with its Sub Pillar and Sub Pillar 1**, so it understands what a short name like "Company loans" or "Auditor Opinion" is about.
+- 5 "Meta" rows (Number of Employees, Current auditor, Reporting boundary, CSO and Investor Relations contact details) are company facts, not scored.
+- The calculation below stays the same; only the list of KPIs is bigger.
 
 ## Example
 
@@ -167,7 +181,7 @@ Option A. See "Why we score KPIs, not pages" above.
 Overall = **35% Environment + 30% Social + 35% Governance**. This applies to the ESG calculator only, not BFSI.
 
 **9. How much is one KPI worth?**
-All KPIs in a category count equally. One Environment KPI moved from 0 to 100 adds 100 ÷ 18 = 5.56 to the Environment score, and 5.56 × 35% = 1.94 to the overall score.
+All KPIs in a category count equally. One Environment metric moved from 0 to 100 adds 100 ÷ 125 = 0.8 to the Environment score, and 0.8 × 35% = 0.28 to the overall score.
 
 **10. What does the CSV show?**
 Each page with its KPIs and their scores, then each KPI's best score, the category totals and the overall score.

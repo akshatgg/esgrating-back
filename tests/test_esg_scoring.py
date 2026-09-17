@@ -68,3 +68,37 @@ def test_summary_rows():
         ["Overall", "35% Environment + 30% Social + 35% Governance", "46.67", "Grade C"],
     ]
     assert scoring.summary_rows({}) == []
+
+
+# --- KPI list from esg_kpis (scripts/import_esg_kpis.py) -------------------------------
+
+def _seed_kpis(db):
+    rows = [("E", "Water", "Water I", "Water related targets", False),
+            ("E", "Water", "Water II", "Water withdrawn", False),
+            ("E", "Waste", "Waste I", "Waste management policy", False),
+            ("G", "Business Ethics", "Meta", "Current auditor", True),
+            ("G", "Business Ethics", "Business Ethics I", "Anti-bribery/corruption policy", False)]
+    for order, (p, sp, sp1, m, meta) in enumerate(rows, 1):
+        db.esg_kpis.insert_one({"pillar": p, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
+                                "order": order, "is_meta": meta})
+
+
+def test_kpi_list_replaces_the_prompt_list_with_context(db):
+    _seed_kpis(db)
+    prompt = "Evaluate the text based on:\n1. Old A\n2. Old B\n\nIdentify keywords.\n- \"score\": 0-100\n\nText:\n{text}"
+    out = scoring.with_kpi_list(prompt, scoring.load_kpis("Environment"))
+    assert out == ("Evaluate the text based on:\n"
+                   "Sub Pillar: Water\n  Sub Pillar 1: Water I\n    1. Water related targets\n"
+                   "  Sub Pillar 1: Water II\n    2. Water withdrawn\n"
+                   "Sub Pillar: Waste\n  Sub Pillar 1: Waste I\n    3. Waste management policy\n"
+                   "\nIdentify keywords.\n- \"score\": 0-100\n\nText:\n{text}")
+    from app.core.kpis import parse_kpi_list
+    assert parse_kpi_list(out) == ["Water related targets", "Water withdrawn", "Waste management policy"]
+    # Meta rows are not scored
+    assert [k["metric"] for k in scoring.load_kpis("Governance")] == ["Anti-bribery/corruption policy"]
+
+
+def test_kpi_list_falls_back_to_the_prompt_without_esg_kpis(db):
+    prompt = "Evaluate:\n1. Old A\n\nText:\n{text}"
+    assert scoring.load_kpis("Environment") == []
+    assert scoring.with_kpi_list(prompt, []) == prompt

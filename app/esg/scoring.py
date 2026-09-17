@@ -10,7 +10,13 @@
 #
 # A page's score (the average of the KPIs found on it) is shown in the report and the CSV
 # to explain that page. It never feeds the category or overall score.
+#
+# The KPIs come from the esg_kpis collection (scripts/import_esg_kpis.py): each metric with
+# its Sub Pillar and Sub Pillar 1, sent to the AI as context. Without that collection the
+# numbered list in the esg_prompts prompt is used, as before.
+import re
 
+from app.core.db import get_db
 from app.core.kpis import _names, kpi_strengths, page_sort_key
 
 # Stored on every result scored this way. Results without it (older runs) keep the
@@ -39,6 +45,50 @@ SCORE_GUIDE = (
 
 # Strengths and Gaps in the report: the score bands above, named.
 STRONG_FROM = 61
+
+
+# --- 0. The KPI list --------------------------------------------------------------------------
+
+KPI_COLLECTION = "esg_kpis"
+PILLAR_CODES = {"Environment": "E", "Social": "S", "Governance": "G"}
+
+# The prompt's own numbered KPI list: consecutive "1. ..." lines.
+_NUMBERED_LIST = re.compile(r"(?m)^[ \t]*\d+\.[ \t]+\S.*(?:\n[ \t]*\d+\.[ \t]+\S.*)*")
+
+
+def load_kpis(category: str) -> list[dict]:
+    """The category's metrics from esg_kpis in sheet order: [{metric, sub_pillar,
+    sub_pillar_1}]. Meta rows (company facts, not scorable) are left out. Empty when the
+    collection has no metrics for the category."""
+    return list(get_db()[KPI_COLLECTION].find(
+        {"pillar": PILLAR_CODES[category], "is_meta": {"$ne": True}},
+        {"_id": 0, "metric": 1, "sub_pillar": 1, "sub_pillar_1": 1},
+    ).sort("order", 1))
+
+
+def kpi_list_text(kpis: list[dict]) -> str:
+    """The metrics numbered 1..N, grouped under their Sub Pillar and Sub Pillar 1 so the AI
+    knows what each short metric name is about. Only the numbered lines are KPIs
+    (app/core/kpis.py parse_kpi_list skips the headings)."""
+    lines, sub_pillar, sub_pillar_1 = [], None, None
+    for i, k in enumerate(kpis, 1):
+        if k["sub_pillar"] != sub_pillar:
+            sub_pillar, sub_pillar_1 = k["sub_pillar"], None
+            lines.append(f"Sub Pillar: {sub_pillar}")
+        if k["sub_pillar_1"] != sub_pillar_1:
+            sub_pillar_1 = k["sub_pillar_1"]
+            lines.append(f"  Sub Pillar 1: {sub_pillar_1}")
+        lines.append(f"    {i}. {k['metric']}")
+    return "\n".join(lines)
+
+
+def with_kpi_list(prompt: str, kpis: list[dict]) -> str:
+    """The prompt with its numbered KPI list replaced by the esg_kpis metrics and their
+    context. Unchanged when there are no metrics or the prompt has no numbered list."""
+    if not kpis:
+        return prompt
+    block = kpi_list_text(kpis)
+    return _NUMBERED_LIST.sub(lambda _m: block, prompt, count=1)
 
 
 # --- 1. KPI scores on one page ---------------------------------------------------------------

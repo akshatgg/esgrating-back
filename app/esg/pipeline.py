@@ -33,19 +33,23 @@ def generate_hash(text, algorithm='sha256'):
     return hash_object.hexdigest()
 
 
-# Added (2026-09-11): scoring is KPI-based (app/core/kpis.py). Each esg_prompts prompt
-# lists its category's numbered KPIs; the scoring call is asked to name the ones it scored
-# the page on (kpis_present), so the score and the export's "KPIs Present" column come
-# from the same answer. The KPI lists are read from esg_prompts, so they follow whatever
-# the prompts say.
+# Added (2026-09-11): scoring is KPI-based (app/esg/scoring.py). The scoring prompt lists
+# the category's numbered KPIs -- from esg_kpis with their sub pillars when that collection
+# has them, else the esg_prompts prompt's own list -- and the KPIs are read back from that
+# same prompt, so the numbers the AI scores always match.
 prompt_kpis = parse_kpi_list
+
+
+def scoring_prompt(category):
+    """The category's esg_prompts prompt with its KPI list (app/esg/scoring.py)."""
+    return scoring.with_kpi_list(read_prompt(category), scoring.load_kpis(category))
 
 
 def attach_page_kpis(esg_records):
     """Put on each page record the KPIs its own scoring answer scored ("name (80)") and
     the page score they give (app/esg/scoring.py). No extra calls: it reads the answers
     already stored on the records."""
-    kpi_lists = {cat: prompt_kpis(read_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
+    kpi_lists = {cat: prompt_kpis(scoring_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
     for r in esg_records:
         try:
             parsed = ast.literal_eval(r["analysis"])  # parsed the way aggregate_scores parses it
@@ -61,7 +65,7 @@ def attach_page_kpis(esg_records):
 def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
-        prompt = scoring.with_score_guide(read_prompt(category))  # KPI scores 0-100 (app/esg/scoring.py)
+        prompt = scoring.with_score_guide(scoring_prompt(category))  # KPI scores 0-100 (app/esg/scoring.py)
         prompt = prompt.format(
             text=text
         )
@@ -277,7 +281,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
         kpi_coverage = {}
         page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
         for category in scores:
-            kpis = prompt_kpis(read_prompt(category))
+            kpis = prompt_kpis(scoring_prompt(category))
             if not kpis:
                 continue
             entries = []
