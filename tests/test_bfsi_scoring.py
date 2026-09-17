@@ -155,3 +155,34 @@ def test_industries_full_equality():
     assert options.INDUSTRIES["infrastructure"]["step3_set"] == "construction"
     for key in ("healthcare", "education", "trade", "services"):
         assert options.INDUSTRIES[key]["step3_set"] == "working"
+
+
+# --- KPI scoring (docs/BFSI_SCORING_METHODOLOGY.md) -------------------------------------
+
+@pytest.mark.parametrize("score,whole,grade", [
+    (90.5, False, "A+"), (90.5, True, "A"), (79.9, True, "B+"), (70.99, True, "B"), (60.9, True, "C"),
+])
+def test_kpi_scored_reports_grade_on_whole_numbers(score, whole, grade):
+    assert bfsi_grade(score, whole)["grade"] == grade
+
+
+def test_methodology_example_two_loan_types():
+    """The worked example in docs/BFSI_SCORING_METHODOLOGY.md."""
+    wc = bfsi_overall(16.2, 55, 70, "Working Capital", True)
+    assert wc["overall"] == 54.74 and wc["grade"] == "C"
+    assert bfsi_recommendation(wc["grade"]) == "Caution — enhanced ESG due diligence recommended"
+    ag = bfsi_overall(16.2, 55, 70, "Agriculture Loan", True)
+    assert ag["overall"] == 39.35 and ag["grade"] == "D"
+    assert bfsi_recommendation(ag["grade"]) == "High risk — detailed review before lending"
+
+
+def test_summary_rows_use_the_loan_type_weights():
+    from app.bfsi import scoring
+    from app.esg.scoring import category_detail
+    ai = {"scoring_method": "kpi_score", "kpi_coverage": {
+        "Environment": category_detail([(1, {"A": 50}), (2, {"A": 40, "B": 80})], ["A", "B"])}}
+    rows = scoring.summary_rows(ai, 65, 55, 70, "Renewable Energy Loan")
+    assert rows[1:4] == [["Category", "KPI", "Best Score", "Found on Pages"],
+                         ["Environment", "A", "50", "1, 2"], ["Environment", "B", "80", "2"]]
+    assert rows[-1] == ["Overall", "Renewable Energy: 50% Environment + 20% Social + 30% Governance",
+                        "64.50", "Grade B"]

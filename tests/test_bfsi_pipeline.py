@@ -9,6 +9,8 @@ from app.bfsi.openai_client import BfsiOpenAiFatal, OpenAiJson
 UNIT = {
     "reason": "because",
     "score": 60,
+    # KPI scores (0-100): point 1 at 90, point 2 at 30 -> page score 60.
+    "kpi_scores": [[1, 90], [2, 30]],
     "positive_keywords": ["solar", "waste"],
     "negative_keywords": ["fine", "spill"],
     "sector": "finance",
@@ -59,6 +61,12 @@ def _default_json(user, system=""):
     if "STRICTLY SELECT THE TOP 5 KEYWORDS" in user:
         return {"keywords": ["p1", "p2", "p3", "p4", "p5"]}
     return dict(QUAL)
+
+
+@pytest.fixture(autouse=True)
+def _no_prompts_in_db(db):
+    """An empty database: the scoring prompts use the built-in CRITERIA (18/18/17 KPIs)."""
+    return db
 
 
 @pytest.fixture
@@ -188,6 +196,7 @@ Text:
     assert pipeline.CRITERIA["E"] in first
     assert first.endswith("\nText:\nalpha beta")
     assert '- "score": A number between 0 and 100.' in first
+    assert '- "kpi_scores": A list of [point number, score] pairs' in first and "81-100:" in first
     assert "%1$s" not in first and "%2$s" not in first and "%3$s" not in first
     assert fake.batches[1][0].startswith("Analyze the following text for social performance.")
     assert fake.batches[2][0].startswith("Analyze the following text for governance performance.")
@@ -273,9 +282,17 @@ def test_two_pages_produce_six_category_calls(fake):
 
 def test_analyze_shape_scores_keywords_and_reasons(fake):
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert out["e_score"] == out["s_score"] == out["g_score"] == 60.0
+    # Category = best KPI scores as a % of the maximum: E and S have 18 KPIs, G has 17.
+    assert out["e_score"] == out["s_score"] == round((90 + 30) / 1800 * 100, 2)   # 6.67
+    assert out["g_score"] == round((90 + 30) / 1700 * 100, 2)                      # 7.06
+    assert out["scoring_method"] == "kpi_score"
+    rows = {r["kpi"]: (r["score"], r["pages"]) for r in out["kpi_coverage"]["Environment"]["kpis"]}
+    assert rows["Renewable energy usage initiatives."] == (90.0, [1, 2])
+    assert rows["Carbon footprint reduction goals."] == (30.0, [1, 2])
+    assert rows["Life on land"] == (0.0, [])
     assert out["keywords"] == {"E": ["solar", "waste"], "S": ["solar", "waste"], "G": ["solar", "waste"]}
     assert out["negative_keywords"]["E"] == ["fine", "spill"]
+    # The page score is the average of the page's KPI scores, not the AI's own number.
     assert out["reasons"]["E"] == [
         {"page": 1, "score": 60.0, "reason": "because"},
         {"page": 2, "score": 60.0, "reason": "because"},
@@ -286,27 +303,28 @@ def test_analyze_shape_scores_keywords_and_reasons(fake):
     assert set(out) == {
         "e_score", "s_score", "g_score", "keywords", "negative_keywords", "reasons",
         "detected_sector", "detected_industry", "top_risks", "top_improvements",
-        "climate_risk", "governance_summary", "key_metrics",
+        "climate_risk", "governance_summary", "key_metrics", "kpi_coverage", "scoring_method",
     }
 
 
-def test_reason_entries_carry_page_and_null_score(monkeypatch):
+def test_reason_entries_carry_page_and_kpi_page_score(monkeypatch):
     def responder(key, prompt):
         return {"reason": " spaced " if key == 0 else "", "score": "nope", "page_no": 99}
     use(monkeypatch, FakeClient(responder=responder))
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert out["reasons"]["E"] == [{"page": 1, "score": None, "reason": "spaced"}]   # blank reason dropped
+    # blank reason dropped; no KPI scores -> page score 0 (the AI's "nope" is ignored)
+    assert out["reasons"]["E"] == [{"page": 1, "score": 0.0, "reason": "spaced"}]
     # a page that arrived without a page_no casts to 0, as PHP's (int)null does
     out = pipeline.bfsi_analyze(SUBMISSION, [{"text": "alpha"}])
-    assert out["reasons"]["E"] == [{"page": 0, "score": None, "reason": "spaced"}]
+    assert out["reasons"]["E"] == [{"page": 0, "score": 0.0, "reason": "spaced"}]
 
 
-def test_failed_units_are_dropped_from_the_average(monkeypatch):
+def test_failed_units_are_left_out(monkeypatch):
     def responder(key, prompt):
-        return None if key == 0 else dict(UNIT, score=80)
+        return None if key == 0 else dict(UNIT, kpi_scores=[[1, 80]])
     use(monkeypatch, FakeClient(responder=responder))
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert out["e_score"] == 80.0
+    assert out["e_score"] == round(80 / 1800 * 100, 2)
     assert [r["page"] for r in out["reasons"]["E"]] == [2]
 
 
@@ -530,3 +548,17 @@ def test_get_client_is_cached_per_key_and_model(monkeypatch):
     assert oc.get_client() is a and a.api_key == "sk-1" and a.model == "gpt-4o-mini"
     monkeypatch.setattr(settings, "bfsi_openai_api_key", "sk-2")
     assert oc.get_client() is not a
+
+
+def test_criteria_come_from_esg_kpis_with_sub_pillar_context(db, fake):
+    for order, (sp, sp1, m) in enumerate([("Water", "Water I", "Water targets"), ("Water", "Water II", "Water withdrawn")], 1):
+        for pillar in "ESG":
+            db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
+                                    "order": order, "is_meta": False})
+    out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
+    first = fake.batches[0][0]
+    assert "Sub Pillar: Water\n  Sub Pillar 1: Water I\n    1. Water targets\n  Sub Pillar 1: Water II\n    2. Water withdrawn" in first
+    assert "Renewable energy usage initiatives." not in first
+    # Same flow: UNIT scores point 1 = 90, point 2 = 30 -> (90 + 30) / 200 -> 60
+    assert out["e_score"] == 60.0
+    assert [k["kpi"] for k in out["kpi_coverage"]["Environment"]["kpis"]] == ["Water targets", "Water withdrawn"]

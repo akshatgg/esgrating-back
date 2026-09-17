@@ -15,7 +15,7 @@ import re
 
 from app.bfsi.options import INDUSTRIES
 from app.bfsi.pipeline import avg_scores
-from app.bfsi.scoring import bfsi_grade, bfsi_overall, bfsi_recommendation
+from app.bfsi.scoring import bfsi_grade, bfsi_overall, bfsi_recommendation, is_kpi_scored
 from app.core.errors import UserError
 from app.esg import scoring as esg_scoring
 from app.esg import store as esg_store
@@ -441,9 +441,10 @@ def _pages_editable(kind: str, base: dict, pages: dict) -> dict:
 
 
 def _kpis(kind: str, base: dict) -> dict:
-    """ESG, per category: the KPI Assessment rows [{kpi, score (0-100), pages}]."""
+    """Per category: the KPI Assessment rows [{kpi, score (0-100), pages}]."""
     out = {c: [] for c in CATS}
-    coverage = base.get("kpi_coverage") if kind == "esg" else None
+    holder = base if kind == "esg" else (base.get("ai_analysis") or {})
+    coverage = holder.get("kpi_coverage") if isinstance(holder, dict) else None
     if not isinstance(coverage, dict):
         return out
     for cat in CATS:
@@ -461,7 +462,8 @@ def _kpis_editable(kind: str, base: dict, kpis: dict) -> dict:
     out = {}
     for cat in CATS:
         best = {r["kpi"]: r["score"] for r in kpis[cat]}
-        out[cat] = bool(best) and _same(esg_scoring.category_score(best), base.get(f"{ESG_PREFIX[cat]}_score"))
+        key = f"{ESG_PREFIX[cat]}_score" if kind == "esg" else BFSI_SCORE_KEY[cat]
+        out[cat] = bool(best) and _same(esg_scoring.category_score(best), base.get(key))
     return out
 
 
@@ -591,6 +593,15 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             cat, eff_pages[cat], edits, base.get(key),
             lambda vals: avg_scores([{"score": v} for v in vals]),
         ))
+        if edits["kpi_scores"][cat]:
+            # Edited KPI scores: the KPI Assessment shows them and, unless the pillar is
+            # set by hand, the pillar is their category score.
+            name = ESG_CATEGORY[cat]
+            detail = esg_scoring.rescore_category(
+                ai["kpi_coverage"][name], {r["kpi"]: r["score"] for r in eff_kpis[cat]})
+            ai["kpi_coverage"][name] = detail
+            if edits["pillar_overrides"][cat] is None:
+                scores[cat] = float(detail["score"])
         if scores[cat] != base.get(key):
             ai[key] = scores[cat]
     reasons = ai.get("reasons")
@@ -615,7 +626,9 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             merged.update(copy.deepcopy(fields[key]))
             ai[key] = merged
 
-    overall = bfsi_overall(scores["E"], scores["S"], scores["G"], doc.get("loan_type", ""))
+    # KPI-scored reports grade on whole numbers, like the ESG calculator.
+    whole = is_kpi_scored(base.get("ai_analysis"))
+    overall = bfsi_overall(scores["E"], scores["S"], scores["G"], doc.get("loan_type", ""), whole)
     industry = doc.get("industry", "")
     effective = {
         "ai_analysis": ai,
@@ -624,7 +637,7 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
         "g_score": scores["G"],
         "overall": overall,
         "recommendation": fields.get("recommendation", bfsi_recommendation(overall["grade"])),
-        "grades": {c: bfsi_grade(scores[c]) for c in CATS},
+        "grades": {c: bfsi_grade(scores[c], whole) for c in CATS},
         "pillar_manual": manual,
         "company": fields.get("company", doc.get("borrower_name")),
         "sector": fields.get("sector", doc.get("sub_sector")),

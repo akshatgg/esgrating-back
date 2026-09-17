@@ -10,7 +10,7 @@ from app.bfsi import store
 from app.bfsi.extract import bfsi_extract_and_fingerprint
 from app.bfsi.options import INDUSTRIES, LOAN_PURPOSES, LOAN_TYPES, MAX_UPLOAD_MB
 from app.bfsi.pipeline import bfsi_analyze
-from app.bfsi.scoring import bfsi_overall
+from app.bfsi.scoring import bfsi_overall, is_kpi_scored
 from app.core.errors import UserError
 from app.core.uploads import save_upload, upload_path
 from app.reports.logo import delete_logo_file
@@ -139,6 +139,8 @@ def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     extracted = bfsi_extract_and_fingerprint(path)
 
     ai = store.get_llm_response(extracted["text_sha256"]) if use_cache else None
+    if ai is not None and not is_kpi_scored(ai):
+        ai = None  # cached from before KPI scoring: score the report again
     if ai is None:
         # Per-page rows for the page-scores export, stored beside the result (not inside
         # ai_analysis, which the report pages load) so a later cache hit can reuse them.
@@ -148,7 +150,7 @@ def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     else:
         page_rows = store.get_cached_pages(extracted["text_sha256"])
 
-    ov = bfsi_overall(ai["e_score"], ai["s_score"], ai["g_score"], sub["loan_type"])
+    ov = bfsi_overall(ai["e_score"], ai["s_score"], ai["g_score"], sub["loan_type"], is_kpi_scored(ai))
 
     # A re-run starts clean: report edits and their snapshot belong to the previous result.
     before = store.submissions_collection().find_one_and_update(

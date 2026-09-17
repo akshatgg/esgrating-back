@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from app.auth.deps import require_admin
 from app.bfsi import store
 from app.bfsi.options import INDUSTRIES, LOAN_PURPOSES, LOAN_TYPES, MAX_UPLOAD_MB
+from app.bfsi import scoring as bfsi_scoring
 from app.bfsi.scoring import bfsi_overall, bfsi_recommendation
 from app.bfsi.submission import MAX_UPLOAD_BYTES, run_bfsi_analysis, store_submission
 from app.core.config import settings
@@ -292,7 +293,8 @@ def get_submission(id: str, admin: str = Depends(require_admin)):
 
     overall = None
     if all(k in doc for k in ("e_score", "s_score", "g_score")):
-        overall = bfsi_overall(doc["e_score"], doc["s_score"], doc["g_score"], doc.get("loan_type", ""))
+        overall = bfsi_overall(doc["e_score"], doc["s_score"], doc["g_score"], doc.get("loan_type", ""),
+                               bfsi_scoring.is_kpi_scored(doc.get("ai_analysis")))
     recommendation = bfsi_recommendation(overall["grade"]) if overall else None
 
     previous = None
@@ -349,7 +351,8 @@ def reset_mail_template(admin: str = Depends(require_admin)):
 @router.get("/submissions/{id}/export_csv")
 def export_page_scores(id: str, admin: str = Depends(require_admin)):
     """Page-by-page scores of the latest analysis run, same columns as the ESG export:
-    one row per scored page and category, grouped by category."""
+    one row per scored page and category, grouped by category, then the KPI summary
+    (best KPI scores, category totals, overall score with the loan type's weights)."""
     doc = _get_submission_or_404(id)
     run = store.report_collection().find_one(
         {"submission_id": doc["_id"], "pages": {"$exists": True}}, sort=[("_id", -1)]
@@ -375,6 +378,9 @@ def export_page_scores(id: str, admin: str = Depends(require_admin)):
                 keywords_cell(result.get("positive_keywords")),
                 keywords_cell(result.get("negative_keywords")),
             ])
+    if all(k in doc for k in ("e_score", "s_score", "g_score")):
+        rows.extend(bfsi_scoring.summary_rows(doc.get("ai_analysis"), doc["e_score"], doc["s_score"],
+                                              doc["g_score"], doc.get("loan_type", "")))
     return csv_response(rows, f"bfsi_{id}_page_scores.csv")
 
 
