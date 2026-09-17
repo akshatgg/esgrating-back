@@ -761,3 +761,12 @@ def test_bfsi_report_kpi_score_rejects_out_of_range(admin_client, db):
     sid = _kpi_scored_bfsi(db)
     url = f"/api/admin/bfsi/submissions/{sid}/report/preview"
     assert admin_client.post(url, json={"kpi_scores": {"E": {"E1": 101}}}).status_code == 422
+
+
+def test_bfsi_pillar_typed_by_hand_is_carried_into_the_kpi_assessment(admin_client, db):
+    sid = _kpi_scored_bfsi(db)
+    base = f"/api/admin/bfsi/submissions/{sid}/report"
+    eff = admin_client.post(f"{base}/preview", json={"pillar_overrides": {"G": 40}}).json()["effective"]
+    gov = eff["ai_analysis"]["kpi_coverage"]["Governance"]
+    assert eff["g_score"] == 40 and gov["score"] == 70 and gov["analyst_score"] == 40
+    assert "analyst_score" not in eff["ai_analysis"]["kpi_coverage"]["Environment"]

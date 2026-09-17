@@ -642,3 +642,35 @@ def test_export_csv_adds_page_scores_and_kpi_summary(admin_client, db):
         "Environment total,,37.33,",
         "Overall,35% Environment + 30% Social + 35% Governance,37.33,Grade D",
     ]
+
+
+def test_pillar_typed_by_hand_is_carried_into_the_kpi_assessment_and_csv(admin_client, db):
+    sid = _kpi_submission(db)
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    body = {"pillar_overrides": {"E": 75}}
+    f = admin_client.post(f"{base}/preview", json=body).json()["effective"]["final"]
+    env = f["kpi_coverage"]["Environment"]
+    # The report uses 75 everywhere; the KPI Assessment keeps its KPI total (60) and says so.
+    assert f["environmental_score"] == 75 and env["score"] == 60 and env["analyst_score"] == 75
+    assert "analyst_score" not in f["kpi_coverage"]["Social"]
+
+    # A KPI edit plus a typed pillar: KPI total follows the KPIs, the pillar stays typed.
+    both = admin_client.post(f"{base}/preview", json={**body, "kpi_scores": {"E": {"E2": 100}}}).json()
+    env = both["effective"]["final"]["kpi_coverage"]["Environment"]
+    assert env["score"] == 90 and env["analyst_score"] == 75
+
+    admin_client.put(f"{base}/edits", json=body)
+    stored = db.esg_submissions.find_one({"_id": sid})["final"]
+    assert stored["kpi_coverage"]["Environment"]["analyst_score"] == 75
+
+    # CSV summary rows say the total was set by the analyst.
+    from app.esg import scoring
+    rows = scoring.summary_rows(stored)
+    assert ["Environment total", "", "75", "Set by analyst (KPI total 60)"] in rows
+    assert ["Social total", "", "30", ""] in rows
+
+    # Removing the typed score clears the note; reset restores the AI version.
+    cleared = admin_client.post(f"{base}/preview", json={"pillar_overrides": {"E": None}}).json()
+    assert "analyst_score" not in cleared["effective"]["final"]["kpi_coverage"]["Environment"]
+    reset = admin_client.delete(f"{base}/edits").json()["effective"]["final"]
+    assert "analyst_score" not in reset["kpi_coverage"]["Environment"] and reset["environmental_score"] == 60
