@@ -18,12 +18,15 @@ from app.mailtpl import esg_team_notice
 from app.reports.logo import delete_logo_file
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-MOBILE_RE = re.compile(r"^(\+91[\-\s]?)?[0]?(91)?[789]\d{9}$")
+# Any country: optional +, then 7-15 digits (E.164 maximum). Separators the user may
+# type are ignored before matching.
+MOBILE_RE = re.compile(r"^\+?\d{7,15}$")
+PHONE_SEPARATORS_RE = re.compile(r"[\s\-().]")
 REPORT_YEAR_RE = re.compile(r"^\d{4}-\d{4}$")
 
 REQUIRED_FIELDS = ("name", "email", "designation", "company_name", "mobile_number", "report_year")
 
-MAX_FILE_BYTES = 10 * 1024 * 1024  # raised from CF7's 5 MB (user, 2026-09-11)
+MAX_FILE_BYTES = 20 * 1024 * 1024
 ALLOWED_EXTENSIONS = {
     "pdf": b"%PDF",
     "docx": b"PK",
@@ -40,7 +43,7 @@ def validate_esg_fields(form: dict) -> dict:
             raise UserError("Please fill in all required fields.")
     if not EMAIL_RE.match(form["email"].strip()):
         raise UserError("Please enter a valid email")
-    if not MOBILE_RE.match(form["mobile_number"].strip()):
+    if not MOBILE_RE.match(PHONE_SEPARATORS_RE.sub("", form["mobile_number"].strip())):
         raise UserError("Please enter a valid phone number")
     if not REPORT_YEAR_RE.match(form["report_year"].strip()):
         raise UserError("Report financial year must look like 2024-2025")
