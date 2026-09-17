@@ -12,6 +12,9 @@ import logging
 import re
 
 from app.bfsi.openai_client import BfsiOpenAiFatal, get_client
+from app.core.kpis import (
+    coverage_detail, kpi_strengths, kpis_from_response, load_kpi_lists, parse_kpi_list, with_kpi_field,
+)
 from app.core.rounding import php_round
 
 logger = logging.getLogger(__name__)
@@ -269,14 +272,46 @@ def modal(results: list, field: str) -> str:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-def bfsi_analyze(submission: dict, pages: list) -> dict:
+# Added (2026-09-11): scoring is KPI-based (app/core/kpis.py). The scoring prompt gains a
+# last response field asking which of the CRITERIA points the unit was scored on, so the
+# score and the page-scores export's "KPIs Present" come from the same answer.
+SCORING_PROMPT = with_kpi_field(CATEGORY_PROMPT)
+
+
+def load_criteria() -> dict:
+    """{E|S|G: numbered KPI list} for the scoring prompts, read from esg_prompts on every
+    analysis -- the same KPIs the ESG calculator scores against, kept in the database so
+    they can grow without a code change. The CRITERIA above are only the fallback for a
+    category whose prompt is missing or has no numbered list."""
+    lists = load_kpi_lists()
+    out = {}
+    for c in ADJECTIVES:
+        kpis = lists.get(CAT_NAMES[c]) or []
+        if not kpis:
+            logger.error("bfsi: no KPI list for %s in esg_prompts; using the built-in criteria", CAT_NAMES[c])
+        out[c] = "\n".join(f"{i}. {k}" for i, k in enumerate(kpis, 1)) if kpis else CRITERIA[c]
+    return out
+
+
+def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -> dict:
     """Score an already-extracted report. Extraction is the caller's job so it can check
-    the text-level cache before spending anything on the API."""
+    the text-level cache before spending anything on the API.
+
+    Added: pass a list as page_rows to have it filled with one entry per scoring unit --
+    {unit, page_no, text, categories: {Environment|Social|Governance: {score, reason,
+    positive_keywords, negative_keywords, kpis}}} -- for the page-scores export. It is
+    kept out of the returned result, which feeds the report pages."""
     units = page_units(pages)
+    criteria = load_criteria()   # the KPIs, from the database
+    kpi_lists = {CAT_NAMES[c]: parse_kpi_list(criteria[c]) for c in ADJECTIVES}
+    if page_rows is not None:
+        page_rows.extend({"unit": i, "page_no": u["page_no"], "text": u["text"], "categories": {}}
+                         for i, u in enumerate(units))
     scores, keywords, negative_keywords, reasons = {}, {}, {}, {}
+    kpi_coverage = {}
     all_results = []
     for cat, adjective in ADJECTIVES.items():
-        prompts = {i: _sprintf(CATEGORY_PROMPT, adjective, CRITERIA[cat], u["text"])
+        prompts = {i: _sprintf(SCORING_PROMPT, adjective, criteria[cat], u["text"])
                    for i, u in enumerate(units)}
         # One request per page, all in flight together. A unit whose retries were all
         # exhausted comes back None and is simply left out of the average.
@@ -286,7 +321,22 @@ def bfsi_analyze(submission: dict, pages: list) -> dict:
                 continue
             r["page_no"] = units[i]["page_no"]     # page travels with the score
             results.append(r)
-        scores[cat] = avg_scores(results)
+            if page_rows is not None:
+                page_rows[i]["categories"][CAT_NAMES[cat]] = {
+                    "score": r.get("score"),
+                    "reason": _s(r.get("reason")).strip(_PHP_TRIM),
+                    "positive_keywords": pool([r], "positive_keywords", 1000),
+                    "negative_keywords": pool([r], "negative_keywords", 1000),
+                    "kpis": kpis_from_response(r, kpi_lists[CAT_NAMES[cat]]),
+                }
+        # KPI coverage (app/core/kpis.py): how well the whole report proves this category's
+        # CRITERIA points, from the KPIs each unit's scoring answer named -- not the average
+        # of the unit scores.
+        kpis = kpi_lists[CAT_NAMES[cat]]
+        detail = coverage_detail([(r.get("page_no"), kpi_strengths(r, kpis)) for r in results], kpis)
+        scores[cat] = php_round(detail["score"], 2)
+        detail["score"] = scores[cat]
+        kpi_coverage[CAT_NAMES[cat]] = detail   # the report's KPI Assessment
         # Positives are ranked by a follow-up call, as the ESG calculator does.
         # Negatives are not — matching it exactly; flip this to rank them too if wanted.
         keywords[cat] = select_keywords(CAT_NAMES[cat], pool(results, "positive_keywords", 40))
@@ -337,4 +387,6 @@ def bfsi_analyze(submission: dict, pages: list) -> dict:
         "climate_risk": q("climate_risk", ""),
         "governance_summary": q("governance_summary", ""),
         "key_metrics": q("key_metrics", []),
+        # Added: every KPI's best level, points and pages, per category (app/core/kpis.py).
+        "kpi_coverage": kpi_coverage,
     }

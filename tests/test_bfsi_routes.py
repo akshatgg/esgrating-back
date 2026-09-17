@@ -56,6 +56,9 @@ class FakeBfsiClient:
 
     def __init__(self, scores=None):
         self.scores = scores or {"environmental": 70.0, "social": 60.0, "governance": 50.0}
+        # KPIs each scoring answer proves (strongly): all 18 Environment points, 9 of the 18
+        # Social points, no Governance points -> KPI coverage 100 / 50 / 0.
+        self.kpis = {"environmental": list(range(1, 19)), "social": list(range(1, 10)), "governance": []}
         self.batch_calls = 0
         self.json_calls = 0
 
@@ -70,6 +73,7 @@ class FakeBfsiClient:
                         "reason": "why", "score": score,
                         "positive_keywords": ["k1", "k2"], "negative_keywords": ["n1"],
                         "sector": "finance", "industry": "banking",
+                        "kpis_strong": self.kpis.get(adj, []),
                     }
                     break
         return out
@@ -455,7 +459,8 @@ def test_admin_analyze_sets_grade_and_overall_and_caches(admin_client, db, fake_
     assert doc["status"] == "report_generated"
     assert doc["grade"] in ("A+", "A", "B+", "B", "C", "D")
     assert doc["overall_score"] is not None
-    assert doc["e_score"] == 70.0 and doc["s_score"] == 60.0 and doc["g_score"] == 50.0
+    # KPI coverage, not the unit-score average (see FakeBfsiClient.kpis).
+    assert doc["e_score"] == 100.0 and doc["s_score"] == 50.0 and doc["g_score"] == 0.0
     assert db.bfsi_report.count_documents({"submission_id": sub_id}) == 1
     assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 1
     assert fake_bfsi.batch_calls > 0
@@ -463,13 +468,48 @@ def test_admin_analyze_sets_grade_and_overall_and_caches(admin_client, db, fake_
     calls_before = fake_bfsi.batch_calls
     json_calls_before = fake_bfsi.json_calls
 
-    resp2 = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    resp2 = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze?use_cache=true")
     assert resp2.status_code == 202
-    # Second run hits the text-hash cache -- no further LLM calls.
+    # Second run opts into the text-hash cache -- no further LLM calls.
     assert fake_bfsi.batch_calls == calls_before
     assert fake_bfsi.json_calls == json_calls_before
     assert db.bfsi_report.count_documents({"submission_id": sub_id}) == 2
     assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 1
+
+
+def test_admin_analyze_use_cache_false_scores_fresh(admin_client, db, fake_bfsi, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    sub_id = _seed_submission(db)
+    admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    calls = fake_bfsi.batch_calls
+
+    resp = admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze?use_cache=false")
+    assert resp.status_code == 202
+    # Scored again rather than served from bfsi_hashes, and the fresh result is cached too.
+    assert fake_bfsi.batch_calls > calls
+    assert db.bfsi_hashes.count_documents({"submission_id": sub_id}) == 2
+
+
+def test_admin_export_page_scores_csv(admin_client, db, fake_bfsi, monkeypatch):
+    import csv
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    sub_id = _seed_submission(db)
+    url = f"/api/admin/bfsi/submissions/{sub_id}/export_csv"
+    assert admin_client.get(url).status_code == 404  # nothing analysed yet
+
+    admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze")
+    resp = admin_client.get(url)
+    assert resp.status_code == 200
+    lines = resp.text.splitlines()
+    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords"
+    rows = list(csv.reader(lines[1:]))
+    assert rows and [r[1] for r in rows] == sorted(
+        (r[1] for r in rows), key=["Environment", "Social", "Governance"].index)
+    assert all(r[4] == "why" and r[7] == "k1, k2" and r[8] == "n1" for r in rows)
+
+    # A cache hit reuses the cached page rows, so the export is unchanged.
+    admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze?use_cache=true")
+    assert admin_client.get(url).text == resp.text
 
 
 def test_admin_analyze_conflict_while_running(admin_client, db):

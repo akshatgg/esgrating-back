@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # With trust_proxy: read CF-Connecting-IP. Only safe when the origin accepts traffic
     # from Cloudflare alone; otherwise any client can set that header.
     trust_cloudflare: bool = False
+    # Every blog post's byline is this fixed value -- never per-post, never
+    # accepted from a client (docs/specs/2026-09-11-blog-feature-design.md).
+    blog_author_name: str = "Chawla"
+    blog_author_title: str = ""
+    blog_author_avatar_url: str = ""
 
 
 settings = Settings()

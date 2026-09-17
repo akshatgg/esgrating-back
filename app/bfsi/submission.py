@@ -125,10 +125,12 @@ def store_submission(form: dict, filename: str, data: bytes, ip: str) -> dict:
         raise UserError("Could not process your submission — please try again.") from e
 
 
-def run_bfsi_analysis(sub_id: ObjectId) -> None:
+def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     """Reproduces admin/analyze.php's sequence (bfsi.md §3): extract, then a cache
     lookup by text hash, then (on a miss) bfsi_analyze + store_llm_response, then
-    bfsi_overall, then the $set of scored fields, then report_insert on every run."""
+    bfsi_overall, then the $set of scored fields, then report_insert on every run.
+    use_cache=False skips the lookup; the fresh result is cached and supersedes the old
+    one (get_llm_response reads newest first)."""
     sub = store.get_submission(str(sub_id))
     if not sub:
         raise RuntimeError("Not found")
@@ -136,10 +138,15 @@ def run_bfsi_analysis(sub_id: ObjectId) -> None:
     path = upload_path("bfsi", sub["file_path"])
     extracted = bfsi_extract_and_fingerprint(path)
 
-    ai = store.get_llm_response(extracted["text_sha256"])
+    ai = store.get_llm_response(extracted["text_sha256"]) if use_cache else None
     if ai is None:
-        ai = bfsi_analyze(sub, extracted["pages"])
-        store.store_llm_response(sub_id, sub["file_path"], extracted["text_sha256"], ai)
+        # Per-page rows for the page-scores export, stored beside the result (not inside
+        # ai_analysis, which the report pages load) so a later cache hit can reuse them.
+        page_rows = []
+        ai = bfsi_analyze(sub, extracted["pages"], page_rows)
+        store.store_llm_response(sub_id, sub["file_path"], extracted["text_sha256"], ai, pages=page_rows)
+    else:
+        page_rows = store.get_cached_pages(extracted["text_sha256"])
 
     ov = bfsi_overall(ai["e_score"], ai["s_score"], ai["g_score"], sub["loan_type"])
 
@@ -162,4 +169,4 @@ def run_bfsi_analysis(sub_id: ObjectId) -> None:
     )
     delete_logo_file(((before or {}).get("report_edits") or {}).get("logo"))
 
-    store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"])
+    store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"], pages=page_rows)

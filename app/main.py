@@ -9,6 +9,9 @@ from app.auth.router import router as auth_router
 from app.bfsi.router_admin import router as bfsi_admin_router
 from app.bfsi.router_public import router as bfsi_public_router
 from app.bfsi.store import ensure_indexes as ensure_bfsi_indexes
+from app.blog.router_admin import router as blog_admin_router
+from app.blog.router_public import router as blog_public_router
+from app.blog.store import ensure_indexes as ensure_blog_indexes
 from app.contact.router import router as contact_router
 from app.core.config import settings
 from app.dashboard.router import router as dashboard_router
@@ -56,6 +59,10 @@ async def lifespan(_app: FastAPI):
         ensure_ratings_indexes()
     except Exception as e:
         logging.getLogger(__name__).warning("could not ensure ratings indexes: %s", e)
+    try:
+        ensure_blog_indexes()
+    except Exception as e:
+        logging.getLogger(__name__).warning("could not ensure blog indexes: %s", e)
     yield
 
 
@@ -80,6 +87,8 @@ app.include_router(ratings_admin_router)
 app.include_router(contact_router)
 app.include_router(dashboard_router)
 app.include_router(reports_router)
+app.include_router(blog_public_router)
+app.include_router(blog_admin_router)
 
 
 @app.exception_handler(UserError)

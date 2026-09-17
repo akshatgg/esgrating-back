@@ -96,7 +96,7 @@ def create_esg_submission(form: dict, filename: str, data: bytes, ip: str, notif
     return str(result.inserted_id)
 
 
-def run_esg_analysis(sub_id: ObjectId) -> None:
+def run_esg_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     """Reproduces /add_user (esg_score_calculator-master/app.py:218-267)."""
     sub = esg_submissions_collection().find_one({"_id": sub_id})
     if not sub:
@@ -109,7 +109,9 @@ def run_esg_analysis(sub_id: ObjectId) -> None:
     if not company_id:
         raise RuntimeError("User insertion failed.")
 
-    result = calculate_esg_score_concurrent([(sub["original_filename"], data)], company_id, sub["report_year"])
+    result = calculate_esg_score_concurrent(
+        [(sub["original_filename"], data)], company_id, sub["report_year"], use_cache=use_cache
+    )
     if "error" in result or result.get("status") == "error":
         raise RuntimeError(result.get("message") or result.get("error"))
 

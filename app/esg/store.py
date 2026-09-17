@@ -101,7 +101,9 @@ def store_llm_response(filename, company_id, hash_value, llm_response):
 
 def get_llm_response(hash_value):
     try:
-        response = report_hash().find_one({"hash": hash_value})
+        # Newest first, so a run with use_cache=False supersedes the older entry for the
+        # same text. With one entry per hash (the norm) this is the original lookup.
+        response = report_hash().find_one({"hash": hash_value}, sort=[("_id", -1)])
         return response["llm_response"] if response else None
     except Exception as e:
         logger.error(f"Failed to fetch LLM response: {e}")

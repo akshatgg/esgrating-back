@@ -133,21 +133,34 @@ def get_llm_response(text_sha: str) -> dict | None:
     return doc["llm_response"] if doc else None
 
 
-def store_llm_response(sub_id: ObjectId, filename: str, sha: str, ai: dict) -> None:
-    hashes_collection().insert_one({
+def store_llm_response(sub_id: ObjectId, filename: str, sha: str, ai: dict, pages: list | None = None) -> None:
+    doc = {
         "submission_id": sub_id,
         "filename": filename,
         "hash": sha,
         "llm_response": ai,
         "created_at": datetime.now(timezone.utc),
-    })
+    }
+    if pages is not None:  # added: per-page rows, so a cache hit can still export them
+        doc["pages"] = pages
+    hashes_collection().insert_one(doc)
 
 
-def report_insert(sub_id: ObjectId, filename: str, reasons, overall: float) -> None:
-    report_collection().insert_one({
+def get_cached_pages(text_sha: str) -> list | None:
+    """The per-page rows stored with the cached result get_llm_response returns (None for
+    results cached before page rows were kept)."""
+    doc = hashes_collection().find_one({"hash": text_sha}, {"pages": 1}, sort=[("_id", -1)])
+    return (doc or {}).get("pages")
+
+
+def report_insert(sub_id: ObjectId, filename: str, reasons, overall: float, pages: list | None = None) -> None:
+    doc = {
         "submission_id": sub_id,
         "filename": filename,
         "analysis": reasons,
         "overall_score": overall,
         "created_at": datetime.now(timezone.utc),
-    })
+    }
+    if pages is not None:  # added: feeds the page-scores export
+        doc["pages"] = pages
+    report_collection().insert_one(doc)

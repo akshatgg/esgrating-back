@@ -215,6 +215,43 @@ def test_admin_analyze_runs_job_to_done(admin_client, db, prompts, monkeypatch):
     assert doc["company_id"] is not None
 
 
+def test_admin_analyze_use_cache_false_scores_fresh(admin_client, db, prompts, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    first = FakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: first)
+    sub_id = _seed_submission(db)
+    admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze")
+    n = len(first.calls)
+    # Opt-in cache: the same text is served from the cache, with no new calls.
+    admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze?use_cache=true")
+    assert len(first.calls) == n
+
+    fresh = FakeLLM({"Environment": 10, "Social": 10, "Governance": 10})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fresh)
+    resp = admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze?use_cache=false")
+    assert resp.status_code == 202
+    assert any("score this" in c for c in fresh.calls)
+    assert db.esg_submissions.find_one({"_id": sub_id})["final"]["environmental_score"] == 10
+
+    # The fresh result supersedes the old cache entry for later cached runs.
+    n = len(fresh.calls)
+    admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze?use_cache=true")
+    assert len(fresh.calls) == n
+    assert db.esg_submissions.find_one({"_id": sub_id})["final"]["environmental_score"] == 10
+
+
+def test_admin_analyze_skips_cache_by_default(admin_client, db, prompts, monkeypatch):
+    monkeypatch.setattr(jobs, "RUN_INLINE", True)
+    fake = FakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    sub_id = _seed_submission(db)
+    admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze")
+    n = len(fake.calls)
+    # No use_cache param (e.g. a stale browser tab): scored again, not served from cache.
+    admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze")
+    assert len(fake.calls) > n
+
+
 def test_admin_analyze_conflict_while_running(admin_client, db):
     sub_id = _seed_submission(db, analysis_status="running")
     resp = admin_client.post(f"/api/admin/esg/submissions/{sub_id}/analyze")
@@ -332,6 +369,20 @@ def test_legacy_export_csv_header(admin_client, db):
                     "negative_keywords": ["emissions"],
                 }),
             },
+            {
+                "filename": "report.pdf",
+                "category": "Social",
+                "text": "hr page",
+                "page_no": 2,
+                "analysis": json.dumps({
+                    "reason": "policies",
+                    "score": 60,
+                    "positive_keywords": ["posh"],
+                    "negative_keywords": [],
+                }),
+                # Set by pipeline.attach_page_kpis; "; " keeps comma-bearing names apart.
+                "kpis": ["Diversity, equity, and inclusion efforts.", "Employee welfare and safety.", " "],
+            },
             # This entry has no "analysis" key (like the aggregate row appended by the
             # pipeline) and must be silently skipped, exactly as eval(None) would have
             # raised and been caught in app.py.
@@ -342,9 +393,32 @@ def test_legacy_export_csv_header(admin_client, db):
     resp = admin_client.get(f"/api/admin/esg/export_csv/{company_id}")
     assert resp.status_code == 200
     lines = resp.text.splitlines()
-    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,Positive Keywords,Negative Keywords"
-    assert lines[1] == "report.pdf,Environment,some page text,1,good disclosure,80,\"renewables, recycling\",emissions"
-    assert len(lines) == 2
+    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords"
+    # A page scored before KPI tagging existed exports an empty KPI cell.
+    assert lines[1] == "report.pdf,Environment,some page text,1,good disclosure,80,,\"renewables, recycling\",emissions"
+    assert lines[2] == ("report.pdf,Social,hr page,2,policies,60,"
+                        "\"Diversity, equity, and inclusion efforts.; Employee welfare and safety.\",posh,")
+    assert len(lines) == 3
+
+
+def test_export_csv_exports_one_run_not_every_run(admin_client, db):
+    cid = ObjectId()
+
+    def run(text, composite):
+        return {"company_id": cid, "filename": ["report.pdf"], "composite_score": composite, "analysis": [{
+            "filename": "report.pdf", "category": "Environment", "text": text, "page_no": 1,
+            "analysis": json.dumps({"reason": "r", "score": 50, "positive_keywords": [], "negative_keywords": []}),
+        }]}
+
+    db.esg_report.insert_one(run("old run", 40.0))
+    db.esg_report.insert_one(run("new run", 60.0))
+    # No submission: the company's newest run only.
+    body = admin_client.get(f"/api/admin/esg/export_csv/{cid}").text
+    assert "new run" in body and "old run" not in body
+    # With a submission: the run behind its report (matched on composite score).
+    sub_id = _seed_submission(db, company_id=cid, original_filename="report.pdf", final={"composite_score": 40.0})
+    body = admin_client.get(f"/api/admin/esg/export_csv/{cid}?submission_id={sub_id}").text
+    assert "old run" in body and "new run" not in body
 
 
 def test_legacy_export_csv_no_data_404(admin_client, db):

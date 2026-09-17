@@ -20,8 +20,10 @@ from app.bfsi.submission import MAX_UPLOAD_BYTES, run_bfsi_analysis, store_submi
 from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import start_job
-from app.core.mail import Attachment, mail_configured, send_mail
+from app.core.mail import Attachment, mail_configured, resolve_recipient, send_mail
+from app.core.mail_templates import compose, reset_template, save_template, template_response
 from app.core.net import client_ip
+from app.core.page_scores import csv_response, keywords_cell, kpis_cell
 from app.core.uploads import read_limited, upload_path
 from app.mailtpl import bfsi_report_mail
 
@@ -111,7 +113,8 @@ async def create_submission(
     ip = client_ip(request)
     result = store_submission(form, filename, data, ip)
     oid = ObjectId(result["id"])
-    start_job("bfsi_submissions", oid, lambda: run_bfsi_analysis(oid))
+    # A new assessment is always scored fresh, like Analyze's default (use_cache=False).
+    start_job("bfsi_submissions", oid, lambda: run_bfsi_analysis(oid, use_cache=False))
     return {"id": result["id"]}
 
 
@@ -309,13 +312,70 @@ def get_submission(id: str, admin: str = Depends(require_admin)):
 
 
 @router.post("/submissions/{id}/analyze", status_code=202)
-def analyze_submission(id: str, admin: str = Depends(require_admin)):
+def analyze_submission(id: str, use_cache: bool = False, admin: str = Depends(require_admin)):
+    """Scores the report fresh by default; ?use_cache=true reuses a cached result for the
+    same text when there is one."""
     doc = _get_submission_or_404(id)
     oid = doc["_id"]
-    started = start_job("bfsi_submissions", oid, lambda: run_bfsi_analysis(oid))
+    started = start_job("bfsi_submissions", oid, lambda: run_bfsi_analysis(oid, use_cache=use_cache))
     if not started:
         raise HTTPException(409, "Analysis is already running.")
     return {"started": True}
+
+
+class MailTemplateIn(BaseModel):
+    subject: str
+    body: str
+
+
+@router.get("/mail-template")
+def get_mail_template(admin: str = Depends(require_admin)):
+    """The Send report email (app/core/mail_templates.py), editable in the Send dialog."""
+    return template_response("bfsi_report")
+
+
+@router.put("/mail-template")
+def put_mail_template(payload: MailTemplateIn, admin: str = Depends(require_admin)):
+    save_template("bfsi_report", payload.subject, payload.body, admin)
+    return template_response("bfsi_report")
+
+
+@router.delete("/mail-template")
+def reset_mail_template(admin: str = Depends(require_admin)):
+    reset_template("bfsi_report")
+    return template_response("bfsi_report")
+
+
+@router.get("/submissions/{id}/export_csv")
+def export_page_scores(id: str, admin: str = Depends(require_admin)):
+    """Page-by-page scores of the latest analysis run, same columns as the ESG export:
+    one row per scored page and category, grouped by category."""
+    doc = _get_submission_or_404(id)
+    run = store.report_collection().find_one(
+        {"submission_id": doc["_id"], "pages": {"$exists": True}}, sort=[("_id", -1)]
+    )
+    if not run:
+        raise HTTPException(
+            404, "Page-by-page scores aren't available for this report yet — re-run the analysis to generate them."
+        )
+    rows = []
+    for cat in ("Environment", "Social", "Governance"):
+        for unit in run["pages"]:
+            result = (unit.get("categories") or {}).get(cat)
+            if not result:
+                continue
+            rows.append([
+                run.get("filename", ""),
+                cat,
+                unit.get("text", ""),
+                unit.get("page_no", ""),
+                result.get("reason", ""),
+                result.get("score", ""),
+                kpis_cell(result.get("kpis")),
+                keywords_cell(result.get("positive_keywords")),
+                keywords_cell(result.get("negative_keywords")),
+            ])
+    return csv_response(rows, f"bfsi_{id}_page_scores.csv")
 
 
 @router.delete("/submissions/{id}")
@@ -336,13 +396,17 @@ def download_submission_file(id: str, admin: str = Depends(require_admin)):
 
 
 @router.post("/submissions/{id}/send")
-async def send_report(id: str, pdfs: list[UploadFile] = File(...), admin: str = Depends(require_admin)):
+async def send_report(id: str, pdfs: list[UploadFile] = File(...), email: str = Form(""),
+                      subject: str = Form(""), body: str = Form(""),
+                      admin: str = Depends(require_admin)):
+    """Mails both reports to `email` -- the address typed in the Send dialog -- else
+    the submission's contact email. `subject`/`body` are the dialog's text; blank
+    means the saved template (app/core/mail_templates.py)."""
     doc = _get_submission_or_404(id)
     if not doc.get("ai_analysis"):
         raise HTTPException(409, "Run the analysis before sending the report.")
-    email = (doc.get("contact_email") or "").strip()
-    if not email:
-        raise HTTPException(422, "This submission has no contact email.")
+    to = resolve_recipient(email, doc.get("contact_email"))
+    mail_subject, mail_body = compose("bfsi_report", subject, body, {"borrower": doc.get("borrower_name")})
     if not mail_configured():
         raise HTTPException(503, "Mail is not configured")
 
@@ -353,10 +417,9 @@ async def send_report(id: str, pdfs: list[UploadFile] = File(...), admin: str = 
             raise UserError("File content does not match its type.")
         attachments.append(Attachment(SEND_FILE_NAMES[i].format(id=id), data, "application/pdf"))
 
-    subject, body = bfsi_report_mail(doc["borrower_name"])
-    send_mail([email], subject, body, cc=[settings.team_email], attachments=attachments)
+    send_mail([to], mail_subject, mail_body, cc=[settings.team_email], attachments=attachments)
 
     store.submissions_collection().update_one(
-        {"_id": doc["_id"]}, {"$set": {"status": "sent", "sent_at": datetime.now(timezone.utc)}}
+        {"_id": doc["_id"]}, {"$set": {"status": "sent", "sent_at": datetime.now(timezone.utc), "sent_to": to}}
     )
     return {"ok": True}

@@ -37,6 +37,39 @@ def bfsi_report_mail(borrower: str) -> tuple[str, str]:
             f"Dear Sir/Madam,\n\nPlease find attached the BFSI ESG Credit Risk Report for {borrower}." + _SIGN)
 
 
+# Default Send report emails (app/core/mail_templates.py). The admin edits them in the
+# Send dialog and can save their own version; {placeholders} are filled per report.
+_REPORT_SIGN = (
+    "For any questions, contact us at info@esgratings.co.in or +91 8587898484.\n\n"
+    "Regards,\nESG Ratings — CFC (SEBI Registered ERP)\nwww.esgratings.co.in"
+)
+
+ESG_REPORT_SUBJECT = "ESG Rating Report — {company} (FY {year})"
+ESG_REPORT_BODY = (
+    "Dear {name},\n\n"
+    "Thank you for choosing ESG Ratings.\n\n"
+    "Please find attached the ESG assessment of {company} for FY {year}:\n"
+    "• ESG Rating Report — the one-page summary of the overall ESG score, grade and pillar scores.\n"
+    "• Detailed Report — the KPI-by-KPI assessment, page-by-page scores and the reasoning "
+    "behind each score.\n\n"
+    "The assessment is based on the sustainability disclosures in the report you shared with us. "
+    "If you would like to discuss the results or how to improve the rating, simply reply to this email.\n\n"
+    + _REPORT_SIGN
+)
+
+BFSI_REPORT_SUBJECT = "BFSI ESG Credit Risk Report — {borrower}"
+BFSI_REPORT_BODY = (
+    "Dear Sir/Madam,\n\n"
+    "Please find attached the BFSI ESG Credit Risk assessment of {borrower}:\n"
+    "• One-Page Rating Report — the overall ESG credit risk score, grade and pillar scores.\n"
+    "• Detailed Report — the pillar marks, KPI assessment, key risks, lending recommendation "
+    "and the page-by-page scoring rationale.\n\n"
+    "The assessment is based on the BRSR / sustainability report submitted with the application. "
+    "Reply to this email if you would like to discuss the results.\n\n"
+    + _REPORT_SIGN
+)
+
+
 def contact_notice(f: dict) -> tuple[str, str]:
     return (f"Website enquiry — {f['name']}",
             f"Name: {f['name']}\nEmail: {f['email']}\nNumber: {f['number']}\n\nMessage:\n{f['message']}")
