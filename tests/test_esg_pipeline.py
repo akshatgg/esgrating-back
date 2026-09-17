@@ -308,3 +308,22 @@ def test_generate_score_params_and_error_string():
                            "response_format": {"type": "json_object"}}
     bad = llm_mod.GPTModel("k", "gpt-x", client=_client(_Completions(fail=True)))
     assert bad.generate_score("hi") == "An unexpected error occurred: nope"
+
+
+def test_scoring_uses_esg_kpis_with_sub_pillar_context(db, monkeypatch):
+    _kpi_prompts(db)  # the prompt's own list (A, B) is replaced by esg_kpis
+    for order, (sp, sp1, m) in enumerate([("Water", "Water I", "Water targets"), ("Water", "Water II", "Water withdrawn"),
+                                          ("Waste", "Waste I", "Waste policy")], 1):
+        for pillar in "ESG":
+            db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
+                                    "order": order, "is_meta": False})
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})  # scores point 2 = 80, point 1 = 32
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025")
+    scoring_calls = [c for c in fake.calls if "score this" in c]
+    assert all("Sub Pillar: Water" in c and "Sub Pillar 1: Water II" in c and "2. Water withdrawn" in c
+               and "Environment A" not in c for c in scoring_calls)
+    # Same flow: best KPI scores over all 3 KPIs -> (32 + 80 + 0) / 300 -> 37.33
+    assert final["environmental_score"] == 37.33
+    assert [k["kpi"] for k in final["kpi_coverage"]["Environment"]["kpis"]] == ["Water targets", "Water withdrawn", "Waste policy"]
