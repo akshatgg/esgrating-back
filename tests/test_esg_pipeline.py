@@ -29,15 +29,16 @@ def test_extract_pdf_and_docx():
 
 
 def test_full_run_scores_composite_and_persists(db, prompts, monkeypatch):
-    # Asymmetric on purpose: 0.3/0.3/0.4 gives 65.0 while a plain average gives 66.67, so an
+    # Asymmetric on purpose: 35/30/35 gives 67.0 while a plain average gives 66.67, so an
     # equal-weight implementation cannot pass this test.
     fake = FakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
     final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
     assert final["environmental_score"] == 90 and final["social_score"] == 60 and final["governance_score"] == 50
-    assert final["composite_score"] == pytest.approx(0.3 * 90 + 0.3 * 60 + 0.4 * 50)  # 65.0, not 66.67
-    # evaluate_score (helper.py:99-112) maps int(65.0)=65 to the 61..70 band -> ("B", "Good").
+    assert final["composite_score"] == pytest.approx(0.35 * 90 + 0.30 * 60 + 0.35 * 50)  # 67.0, not 66.67
+    assert final["scoring_method"] == "kpi_score"
+    # evaluate_score (helper.py:99-112) maps int(67.0)=67 to the 61..70 band -> ("B", "Good").
     assert final["composite_score_performance"] == "B"
     assert final["composite_score_performance_label"] == "Good"
     assert final["sector"] == "Finance" and final["industry"] == "Banking"
@@ -61,14 +62,14 @@ def test_prompt_kpis_reads_only_the_numbered_list():
 
 
 class KpiFakeLLM(FakeLLM):
-    """Scoring answers that also name the KPIs the page proves: point 2 strongly, point 1
-    partly, and an out-of-range 9 that must be dropped."""
+    """Scoring answers that also score the KPIs the page addresses (0-100): point 2 at 80,
+    point 1 at 32 (as a string number), and an out-of-range 9 that must be dropped."""
 
     def generate_score(self, text):
         out = super().generate_score(text)
-        if '"kpis_strong"' in text:
+        if '"kpi_scores"' in text:
             answer = json.loads(out)
-            answer.update({"kpis_strong": [2, 9], "kpis_partial": ["1"]})
+            answer.update({"kpi_scores": [[2, 80], [9, 50], ["1", "32"]]})
             return json.dumps(answer)
         return out
 
@@ -78,34 +79,59 @@ def _kpi_prompts(db):
         db.esg_prompts.insert_one({"category": cat, "prompt": f"[{cat}] score this:\n1. {cat} A\n2. {cat} B\n\nText:\n{{text}}"})
 
 
-def test_one_scoring_call_names_kpis_and_score_is_kpi_coverage(db, monkeypatch):
+def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monkeypatch):
     _kpi_prompts(db)
     fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
     final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
-    # One call per page and category -- the scoring call itself asks for the KPIs -- plus
-    # the three keyword-ranking calls. No separate KPI call.
-    scoring = [c for c in fake.calls if "score this" in c]
-    assert len(scoring) == 6 and all('"kpis_strong"' in c for c in scoring)
+    # One call per page and category -- the scoring call itself scores the KPIs, with the
+    # scoring guide -- plus the three keyword-ranking calls. No separate KPI call.
+    scoring_calls = [c for c in fake.calls if "score this" in c]
+    assert len(scoring_calls) == 6 and all('"kpi_scores"' in c and "81-100:" in c for c in scoring_calls)
     assert len(fake.calls) == 6 + 3
-    # Category score = KPI coverage (B strong 100, A partial 50 -> 75), not the page average.
-    assert final["environmental_score"] == 75 and final["social_score"] == 75 and final["governance_score"] == 75
+    # Category = best KPI scores as a % of the maximum: (32 + 80) / 200 -> 56, whatever the
+    # AI's own page score (90 / 60 / 50) was.
+    assert final["environmental_score"] == 56 and final["social_score"] == 56 and final["governance_score"] == 56
+    assert final["composite_score"] == pytest.approx(56)
+    detail = final["kpi_coverage"]["Environment"]
+    assert detail["method"] == "kpi_score"
+    assert [(k["kpi"], k["score"], k["level"], k["pages"]) for k in detail["kpis"]] == [
+        ("Environment A", 32.0, "partial", [1, 2]), ("Environment B", 80.0, "strong", [1, 2]),
+    ]
+    # Page score = the average of that page's KPI scores.
+    assert all(row["Environment"]["score"] == 56 for row in final["page_scores"])
+    assert final["page_scores"][0]["Environment"]["kpi_names"] == ["Environment B (80)", "Environment A (32)"]
     pages = [r for r in db.esg_report.find_one({"company_id": cid})["analysis"] if "category" in r]
     assert len(pages) == 6
-    assert all(r["kpis"] == [f"{r['category']} B", f"{r['category']} A (partial)"] for r in pages)
+    assert all(r["kpis"] == [f"{r['category']} B (80)", f"{r['category']} A (32)"] for r in pages)
+    assert all(r["page_score"] == 56 for r in pages)
 
 
-def test_zero_score_category_gets_no_kpis(db, monkeypatch):
-    _kpi_prompts(db)
-    # The answers still name KPIs, but every Environment page scored 0.
-    fake = KpiFakeLLM({"Environment": 0, "Social": 60, "Governance": 50})
+def test_missing_kpis_count_as_zero(db, monkeypatch):
+    for cat in ("Environment", "Social", "Governance"):
+        db.esg_prompts.insert_one({"category": cat, "prompt": f"[{cat}] score this:\n1. A\n2. B\n3. C\n4. D\n\nText:\n{{text}}"})
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
     final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025")
-    pages = [r for r in db.esg_report.find_one({"company_id": cid})["analysis"] if "category" in r]
-    assert [r["kpis"] for r in pages if r["category"] == "Environment"] == [[]]
-    assert final["environmental_score"] == 0 and final["social_score"] == 75
+    # (32 + 80 + 0 + 0) / 400 -> 28; the page itself scores 56 (its own KPIs only).
+    assert final["environmental_score"] == 28
+    assert final["page_scores"][0]["Environment"]["score"] == 56
+
+
+def test_cached_result_from_before_kpi_scoring_is_scored_again(db, monkeypatch):
+    _kpi_prompts(db)
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    pdf = make_pdf(["same text"])
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    pipeline.calculate_esg_score_concurrent([("r.pdf", pdf)], cid, "2024-2025")
+    # Make the cached entry look like an old strong/partial result.
+    db.esg_hashes.update_many({}, {"$unset": {"llm_response.scoring_method": ""}, "$set": {"llm_response.composite_score": 1}})
+    n_calls = len(fake.calls)
+    again = pipeline.calculate_esg_score_concurrent([("r.pdf", pdf)], cid, "2024-2025")
+    assert len(fake.calls) > n_calls and again["composite_score"] == pytest.approx(56)
 
 
 def test_answers_naming_no_kpis_score_zero(db, monkeypatch):
@@ -282,3 +308,22 @@ def test_generate_score_params_and_error_string():
                            "response_format": {"type": "json_object"}}
     bad = llm_mod.GPTModel("k", "gpt-x", client=_client(_Completions(fail=True)))
     assert bad.generate_score("hi") == "An unexpected error occurred: nope"
+
+
+def test_scoring_uses_esg_kpis_with_sub_pillar_context(db, monkeypatch):
+    _kpi_prompts(db)  # the prompt's own list (A, B) is replaced by esg_kpis
+    for order, (sp, sp1, m) in enumerate([("Water", "Water I", "Water targets"), ("Water", "Water II", "Water withdrawn"),
+                                          ("Waste", "Waste I", "Waste policy")], 1):
+        for pillar in "ESG":
+            db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
+                                    "order": order, "is_meta": False})
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})  # scores point 2 = 80, point 1 = 32
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025")
+    scoring_calls = [c for c in fake.calls if "score this" in c]
+    assert all("Sub Pillar: Water" in c and "Sub Pillar 1: Water II" in c and "2. Water withdrawn" in c
+               and "Environment A" not in c for c in scoring_calls)
+    # Same flow: best KPI scores over all 3 KPIs -> (32 + 80 + 0) / 300 -> 37.33
+    assert final["environmental_score"] == 37.33
+    assert [k["kpi"] for k in final["kpi_coverage"]["Environment"]["kpis"]] == ["Water targets", "Water withdrawn", "Waste policy"]

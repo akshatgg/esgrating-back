@@ -17,6 +17,7 @@ from app.bfsi.options import INDUSTRIES
 from app.bfsi.pipeline import avg_scores
 from app.bfsi.scoring import bfsi_grade, bfsi_overall, bfsi_recommendation
 from app.core.errors import UserError
+from app.esg import scoring as esg_scoring
 from app.esg import store as esg_store
 from app.esg.pipeline import category_average, composite_score, evaluate_score
 
@@ -79,6 +80,7 @@ FIELD_SPECS = {
 FIELD_KEYS = {kind: list(spec) for kind, spec in FIELD_SPECS.items()}
 
 PAGES_LOCKED = "Page scores can't be edited for this pillar; edit the pillar score instead."
+KPIS_LOCKED = "KPI scores can't be edited for this pillar; edit the pillar score instead."
 
 HEADING_MAX = 200
 SHORT_MAX = 200
@@ -123,6 +125,14 @@ def _score(value, where: str) -> float:
     return max(0.0, min(100.0, float(value)))
 
 
+def _kpi_score(value, where: str) -> float:
+    """A KPI score: a number from 0 to 100. Out of range is refused, not clamped."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            or not 0 <= value <= 100):
+        raise UserError(f"{where} must be a number between 0 and 100.")
+    return float(value)
+
+
 def _as_dict(value, where: str) -> dict:
     if value is None:
         return {}
@@ -142,6 +152,7 @@ def empty_edits() -> dict:
         "headings": {},
         "fields": {},
         "page_scores": {c: {} for c in CATS},
+        "kpi_scores": {c: {} for c in CATS},
         "pillar_overrides": {c: None for c in CATS},
         "logo": None,
     }
@@ -158,7 +169,7 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
     Returns the canonical edits (without logo). Raises UserError (422) on anything off."""
     if not isinstance(payload, dict):
         raise UserError("The edits must be a JSON object.")
-    unknown = set(payload) - {"headings", "fields", "page_scores", "pillar_overrides"} - _IGNORED_BODY_KEYS
+    unknown = set(payload) - {"headings", "fields", "page_scores", "kpi_scores", "pillar_overrides"} - _IGNORED_BODY_KEYS
     if unknown:
         raise UserError(f"Unknown key: {sorted(unknown)[0]}")
 
@@ -242,6 +253,21 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                 continue
             out["page_scores"][cat][page] = value
 
+    # KPI scores (0-100, ESG) are keyed by KPI name, as the KPI Assessment lists them.
+    for cat, scores in _as_dict(payload.get("kpi_scores"), "kpi_scores").items():
+        _cat(cat, "kpi_scores")
+        scores = _as_dict(scores, f"kpi_scores.{cat}")
+        if scores and not ctx["kpis_editable"][cat]:
+            raise UserError(KPIS_LOCKED)
+        originals = {r["kpi"]: r["score"] for r in ctx["kpis"][cat]}
+        for name, value in scores.items():
+            if name not in originals:
+                raise UserError(f"kpi_scores.{cat}: {name!r} is not a KPI of this report.")
+            value = _kpi_score(value, f"Score for {cat} KPI {name!r}")
+            if _same(value, originals[name]):
+                continue  # equal to the AI's score: no override
+            out["kpi_scores"][cat][name] = value
+
     for cat, value in _as_dict(payload.get("pillar_overrides"), "pillar_overrides").items():
         _cat(cat, "pillar_overrides")
         out["pillar_overrides"][cat] = None if value is None else _score(value, f"{cat} pillar score")
@@ -257,6 +283,7 @@ def edits_have_content(edits: dict | None) -> bool:
         edits.get("headings")
         or edits.get("fields")
         or any((edits.get("page_scores") or {}).get(c) for c in CATS)
+        or any((edits.get("kpi_scores") or {}).get(c) for c in CATS)
         or any((edits.get("pillar_overrides") or {}).get(c) is not None for c in CATS)
     )
 
@@ -269,6 +296,7 @@ def stored_edits(doc: dict) -> dict:
     out["fields"] = copy.deepcopy(raw.get("fields") or {})
     for c in CATS:
         out["page_scores"][c] = dict((raw.get("page_scores") or {}).get(c) or {})
+        out["kpi_scores"][c] = dict((raw.get("kpi_scores") or {}).get(c) or {})
         out["pillar_overrides"][c] = (raw.get("pillar_overrides") or {}).get(c)
     out["logo"] = raw.get("logo")
     out["updated_at"] = raw.get("updated_at")
@@ -323,7 +351,8 @@ def _esg_report_doc(doc: dict, base_final: dict) -> dict | None:
 
 def _esg_page(record: dict) -> tuple:
     """(score, reason) the way aggregate_scores reads a page: ast.literal_eval of the LLM
-    output, score defaulting to 0; unparseable output (skipped by the pipeline) -> None."""
+    output, score defaulting to 0; unparseable output (skipped by the pipeline) -> None.
+    A KPI-scored page shows its page_score instead of the AI's own number."""
     raw = record.get("analysis")
     try:
         parsed = ast.literal_eval(raw) if isinstance(raw, str) else raw
@@ -332,6 +361,8 @@ def _esg_page(record: dict) -> tuple:
     if not isinstance(parsed, dict):
         return None, ""
     score = parsed.get("score", 0)
+    if isinstance(record.get("page_score"), (int, float)):
+        score = record["page_score"]  # KPI-scored runs: the average of the page's KPI scores
     if not isinstance(score, (int, float)):
         score = None
     reason = parsed.get("reason", "")
@@ -409,10 +440,37 @@ def _pages_editable(kind: str, base: dict, pages: dict) -> dict:
     return out
 
 
+def _kpis(kind: str, base: dict) -> dict:
+    """ESG, per category: the KPI Assessment rows [{kpi, score (0-100), pages}]."""
+    out = {c: [] for c in CATS}
+    coverage = base.get("kpi_coverage") if kind == "esg" else None
+    if not isinstance(coverage, dict):
+        return out
+    for cat in CATS:
+        detail = coverage.get(ESG_CATEGORY[cat])
+        rows = detail.get("kpis") if isinstance(detail, dict) else None
+        for r in rows if isinstance(rows, list) else []:
+            if isinstance(r, dict) and isinstance(r.get("kpi"), str):
+                out[cat].append({"kpi": r["kpi"], "score": esg_scoring.kpi_best(r), "pages": r.get("pages") or []})
+    return out
+
+
+def _kpis_editable(kind: str, base: dict, kpis: dict) -> dict:
+    """Per category: do the KPI scores reproduce the stored pillar score? Only then can a
+    KPI edit recompute the pillar soundly (as _pages_editable for pages)."""
+    out = {}
+    for cat in CATS:
+        best = {r["kpi"]: r["score"] for r in kpis[cat]}
+        out[cat] = bool(best) and _same(esg_scoring.category_score(best), base.get(f"{ESG_PREFIX[cat]}_score"))
+    return out
+
+
 def load_context(kind: str, doc: dict) -> dict:
     base = copy.deepcopy(doc["report_original"]) if doc.get("report_original") else snapshot(kind, doc)
     pages = _pages(kind, doc, base)
-    return {"base": base, "pages": pages, "pages_editable": _pages_editable(kind, base, pages)}
+    kpis = _kpis(kind, base)
+    return {"base": base, "pages": pages, "pages_editable": _pages_editable(kind, base, pages),
+            "kpis": kpis, "kpis_editable": _kpis_editable(kind, base, kpis)}
 
 
 # --- effective computation -----------------------------------------------------------------
@@ -452,6 +510,15 @@ def _pages_response(eff_pages: dict) -> dict:
     }
 
 
+def _effective_kpis(ctx: dict, edits: dict) -> dict:
+    """Per category: KPI rows with the effective score and the AI's original."""
+    return {
+        cat: [{"kpi": r["kpi"], "score": edits["kpi_scores"][cat].get(r["kpi"], r["score"]),
+               "original_score": r["score"], "pages": r["pages"]} for r in ctx["kpis"][cat]]
+        for cat in CATS
+    }
+
+
 def _pillar(cat: str, rows: list, edits: dict, original_score, average):
     """Spec step 3: override > recomputed page average (only if a page was edited) > stored."""
     override = edits["pillar_overrides"][cat]
@@ -466,6 +533,7 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
     """{effective, pages, stored} where `stored` is the $set that writes the effective
     values into the submission's own report fields."""
     eff_pages = _effective_pages(ctx, edits)
+    eff_kpis = _effective_kpis(ctx, edits)
     fields = edits["fields"]
     manual = {c: edits["pillar_overrides"][c] is not None for c in CATS}
     headings = dict(edits["headings"])
@@ -480,9 +548,20 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
                 # aggregate_scores skips pages whose output did not parse (score None).
                 lambda scores: category_average([s for s in scores if s is not None]),
             )
+            if edits["kpi_scores"][cat]:
+                # Edited KPI scores: the KPI Assessment shows them and, unless the pillar
+                # is set by hand, the pillar is their category score.
+                name = ESG_CATEGORY[cat]
+                detail = esg_scoring.rescore_category(
+                    final["kpi_coverage"][name], {r["kpi"]: r["score"] for r in eff_kpis[cat]})
+                final["kpi_coverage"][name] = detail
+                if edits["pillar_overrides"][cat] is None:
+                    final[key] = detail["score"]
         if any(final[f"{ESG_PREFIX[c]}_score"] != base.get(f"{ESG_PREFIX[c]}_score") for c in CATS):
+            # Each report keeps the weights it was scored with (older reports: 30/30/40).
             final["composite_score"] = composite_score(
-                final["environmental_score"], final["social_score"], final["governance_score"]
+                final["environmental_score"], final["social_score"], final["governance_score"],
+                esg_scoring.weights_for(base),
             )
         for key in ("environmental", "social", "governance", "composite"):
             performance, label = evaluate_score(final[f"{key}_score"])
@@ -500,7 +579,8 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             "logo_url": logo_url,
             "pillar_manual": manual,
         }
-        return {"effective": effective, "pages": _pages_response(eff_pages), "stored": {"final": final}}
+        return {"effective": effective, "pages": _pages_response(eff_pages), "kpis": eff_kpis,
+                "stored": {"final": final}}
 
     # BFSI
     ai = copy.deepcopy(base["ai_analysis"])
@@ -562,4 +642,4 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
         "grade": overall["grade"],
         "ai_analysis": ai,
     }
-    return {"effective": effective, "pages": _pages_response(eff_pages), "stored": stored}
+    return {"effective": effective, "pages": _pages_response(eff_pages), "kpis": eff_kpis, "stored": stored}

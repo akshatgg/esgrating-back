@@ -25,7 +25,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
 
 # The report_edits sub-fields a PUT owns. It sets (or unsets) exactly these, never the
 # whole report_edits object, so a logo uploaded while the PUT was in flight survives.
-_CONTENT_KEYS = ("headings", "fields", "page_scores", "pillar_overrides")
+_CONTENT_KEYS = ("headings", "fields", "page_scores", "kpi_scores", "pillar_overrides")
 
 
 def _collection(kind: str):
@@ -117,6 +117,8 @@ def _report(kind: str, doc: dict) -> dict:
         "edits": edits,
         "pages": result["pages"],
         "pages_editable": ctx["pages_editable"],
+        "kpis": result["kpis"],
+        "kpis_editable": ctx["kpis_editable"],
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
@@ -141,6 +143,8 @@ def preview_report(kind: str, id: str, payload: dict = Depends(edits_body),
         "effective": result["effective"],
         "pages": result["pages"],
         "pages_editable": ctx["pages_editable"],
+        "kpis": result["kpis"],
+        "kpis_editable": ctx["kpis_editable"],
     })
 
 
