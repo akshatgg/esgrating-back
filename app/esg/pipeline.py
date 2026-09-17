@@ -16,9 +16,9 @@ import re
 from collections import Counter
 from datetime import datetime
 
-from app.core.kpis import (
-    coverage_detail, kpi_strengths, kpis_from_response, page_sort_key, parse_kpi_list, with_kpi_field,
-)
+from app.core.kpis import page_sort_key, parse_kpi_list
+from app.esg import scoring
+from app.esg.scoring import composite_score, evaluate_score  # noqa: F401 (used by app.reports.editing)
 from app.esg import llm as llm_mod
 from app.esg.extract import process_files, split_text_into_chunks
 from app.esg.store import insert_esg_collection, store_llm_response, get_llm_response, read_prompt
@@ -42,21 +42,26 @@ prompt_kpis = parse_kpi_list
 
 
 def attach_page_kpis(esg_records):
-    """Put on each page record the KPIs its own scoring answer named, in the prompt's
-    wording. No extra calls: it reads the answers already stored on the records."""
+    """Put on each page record the KPIs its own scoring answer scored ("name (80)") and
+    the page score they give (app/esg/scoring.py). No extra calls: it reads the answers
+    already stored on the records."""
     kpi_lists = {cat: prompt_kpis(read_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
     for r in esg_records:
         try:
             parsed = ast.literal_eval(r["analysis"])  # parsed the way aggregate_scores parses it
         except Exception:
             parsed = None
-        r["kpis"] = kpis_from_response(parsed, kpi_lists.get(r["category"], []))
+        kpis = kpi_lists.get(r["category"], [])
+        scores = scoring.page_kpi_scores(parsed, kpis)
+        r["kpis"] = scoring.kpi_labels(scores, kpis)
+        if kpis:
+            r["page_score"] = scoring.page_score(scores)
 
 
 def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
-        prompt = with_kpi_field(read_prompt(category))  # KPI-based scoring (see attach_page_kpis)
+        prompt = scoring.with_score_guide(read_prompt(category))  # KPI scores 0-100 (app/esg/scoring.py)
         prompt = prompt.format(
             text=text
         )
@@ -109,15 +114,6 @@ def category_average(scores):
     return round_average(total_score, count)
 
 
-def composite_score(environmental, social, governance):
-    # Unrounded, as the original stores it.
-    return (
-        0.30 * environmental +
-        0.30 * social +
-        0.40 * governance
-    )
-
-
 # Function to aggregate scores from multiple chunks
 def aggregate_scores(score_results,category):
     total_score = 0
@@ -155,20 +151,14 @@ def analyze_chunk(chunk: str, category: str):
     logger.info(f"Analyzing chunk for {category}...")
     return analyze_text_with_gpt(chunk, category)
 
-def evaluate_score(score):
-    score = int(score)
-    if score > 90:
-        return "A+", "Outstanding"
-    elif 80 <= score <= 90:
-        return "A", "Excellent"
-    elif 71 <= score <= 79:
-        return "B+", "Very Good"
-    elif 61 <= score <= 70:
-        return "B", "Good"
-    elif 40 <= score <= 60:
-        return "C", "Average"
-    else:
-        return "D", "Below Average"
+def _cached(hash_text):
+    """The cached result for this text, if it was scored with the current method. A
+    result from before KPI scoring is ignored, so the report is scored again."""
+    cached = get_llm_response(hash_text)
+    if isinstance(cached, dict) and cached.get("scoring_method") == scoring.METHOD:
+        return cached
+    return None
+
 
 def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=True):
     # Added: use_cache=False skips the esg_hashes lookup so the report is scored fresh;
@@ -190,7 +180,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             hash_text = generate_hash(processed_data)
             logger.info(f"Company Hash: {hash_text}")
 
-            llm_response = get_llm_response(hash_text) if use_cache else None
+            llm_response = _cached(hash_text) if use_cache else None
             if llm_response:
                 return llm_response
 
@@ -224,7 +214,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             hash_text = generate_hash(combined_text)
             logger.info(f"Company Hash: {hash_text}")
 
-            llm_response = get_llm_response(hash_text) if use_cache else None
+            llm_response = _cached(hash_text) if use_cache else None
             if llm_response:
                 return llm_response
 
@@ -279,10 +269,10 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                     "positive_keywords": []
                 }
 
-        # Added (2026-09-11): KPI-coverage scoring (app/core/kpis.py). A category's score is
-        # how well the whole report proves its prompt's KPIs, built from the KPIs each page's
-        # scoring answer named -- not the average of the page scores. A prompt without a
-        # numbered KPI list keeps the original average.
+        # KPI scoring (app/esg/scoring.py, docs/ESG_SCORING_METHODOLOGY.md): each page's
+        # answer scores the KPIs it addresses 0-100; a category's score is every KPI's best
+        # score as a percentage of the maximum -- never the average of page scores. A
+        # prompt without a numbered KPI list keeps the original page average.
         # The same numbers, KPI by KPI, go into the report as its KPI Assessment.
         kpi_coverage = {}
         page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
@@ -298,19 +288,19 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                     parsed = ast.literal_eval(rec["analysis"])
                 except Exception:
                     continue
-                strengths = kpi_strengths(parsed, kpis)
-                entries.append((rec.get("page_no"), strengths))
+                page_kpis = scoring.page_kpi_scores(parsed, kpis)
+                entries.append((rec.get("page_no"), page_kpis))
                 if isinstance(parsed, dict) and rec.get("page_no") is not None:
                     # Saved with the result for the Detailed Report's Page Scores and
-                    # Scoring Rationale: the page's score, its KPIs and the AI's reason.
+                    # Scoring Rationale: the page's score (from its KPIs), its KPIs with
+                    # their scores and the AI's reason.
                     page_rows.setdefault(rec["page_no"], {})[category] = {
-                        "score": parsed.get("score"),
-                        "kpis": len(strengths),
-                        "kpi_names": kpis_from_response(parsed, kpis),
+                        "score": scoring.page_score(page_kpis),
+                        "kpis": len(page_kpis),
+                        "kpi_names": scoring.kpi_labels(page_kpis, kpis),
                         "reason": str(parsed.get("reason") or ""),
                     }
-            detail = coverage_detail(entries, kpis)
-            detail["score"] = round(detail["score"], 2)
+            detail = scoring.category_detail(entries, kpis)
             final_scores[category]["score"] = detail["score"]
             kpi_coverage[category] = detail
 
@@ -324,6 +314,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 final_scores['Social']['score'],
                 final_scores['Governance']['score'],
             ),
+            "scoring_method": scoring.METHOD,
             "sector": final_scores['Environment']['sector'].capitalize(),
             "industry": final_scores['Environment']['industry'].capitalize(),
             "environmental_top_keywords": final_scores['Environment']['positive_keywords'],
@@ -361,11 +352,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             }
 
         # Evaluate score performance
-        for key in ['environmental', 'social', 'governance', 'composite']:
-            score = final_report_data[f"{key}_score"]
-            performance, label = evaluate_score(score)
-            final_report_data[f"{key}_score_performance"] = performance
-            final_report_data[f"{key}_score_performance_label"] = label
+        scoring.grade_all(final_report_data)
 
         # Page KPIs for the export -- after scoring, so they cannot change a score, and
         # never allowed to fail a run that has already scored.

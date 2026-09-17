@@ -20,7 +20,7 @@ from app.core.mail_templates import compose, reset_template, save_template, temp
 from app.core.net import client_ip
 from app.core.page_scores import csv_response, kpis_cell
 from app.core.uploads import read_limited, upload_path
-from app.esg import store
+from app.esg import scoring, store
 from app.esg.submissions import MAX_FILE_BYTES, create_esg_submission, esg_submissions_collection, run_esg_analysis, serialize_doc
 from app.mailtpl import esg_report_mail
 from app.reports.editing import _esg_report_doc
@@ -296,10 +296,12 @@ def legacy_export_csv(company_id: str, submission_id: str | None = None,
     ?submission_id= when given (the report editor's own lookup), else the newest run."""
     cid = _oid(company_id)
     run = None
+    final = None  # the scores for the summary rows
     if submission_id:
         sub = _get_submission_or_404(_oid(submission_id))
         if sub.get("company_id") == cid and sub.get("final"):
             run = _esg_report_doc(sub, sub["final"])
+            final = sub["final"]  # includes any admin edits
     if run is None:
         run = store.esg_collection().find_one({"company_id": cid}, sort=[("_id", -1)])
     if not run:
@@ -322,12 +324,18 @@ def legacy_export_csv(company_id: str, submission_id: str | None = None,
                     analysis_data.get("text", ""),
                     analysis_data.get("page_no", ""),
                     analysis_reason.get("reason", ""),
-                    analysis_reason.get("score", ""),
+                    # KPI-scored runs: the page score is the average of the page's KPI scores.
+                    analysis_data.get("page_score", analysis_reason.get("score", "")),
                     kpis_cell(analysis_data.get("kpis")),
                     ", ".join(analysis_reason.get("positive_keywords", [])),
                     ", ".join(analysis_reason.get("negative_keywords", [])),
                 ])
             except Exception:
                 continue
+
+    if final is None:
+        # The run's own result is the entry of its analysis list that carries the scores.
+        final = next((a for a in run.get("analysis", []) if isinstance(a, dict) and "composite_score" in a), None)
+    rows.extend(scoring.summary_rows(final))
 
     return csv_response(rows, f"company_{company_id}_esg.csv")

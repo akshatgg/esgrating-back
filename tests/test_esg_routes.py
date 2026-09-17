@@ -195,7 +195,7 @@ def test_admin_create_submission_starts_analysis(admin_client, db, prompts, monk
     doc = db.esg_submissions.find_one({"_id": ObjectId(sub_id)})
     assert doc["status"] == "report_generated"
     assert doc["analysis_status"] == "done"
-    assert doc["final"]["composite_score"] == pytest.approx(0.3 * 90 + 0.3 * 60 + 0.4 * 50)
+    assert doc["final"]["composite_score"] == pytest.approx(0.35 * 90 + 0.30 * 60 + 0.35 * 50)
 
 
 def test_admin_analyze_runs_job_to_done(admin_client, db, prompts, monkeypatch):
@@ -531,3 +531,114 @@ def test_analyze_fails_when_user_insertion_fails(admin_client, db, prompts, monk
     doc = db.esg_submissions.find_one({"_id": sub_id})
     assert doc["analysis_status"] == "failed"
     assert doc["analysis_error"] == "User insertion failed."
+
+
+# --- KPI scores: report editor and CSV summary ---------------------------------------------
+
+def _kpi_submission(db, method=True):
+    """A report scored per KPI (method) or an older strong/partial one (100 / 50 / 0)."""
+    from app.esg import scoring
+    scores = ({"Environment": [80, 40], "Social": [60, 0], "Governance": [90, 50]} if method
+              else {"Environment": [100, 50], "Social": [100, 0], "Governance": [50, 50]})
+    coverage, final = {}, {"sector": "Finance", "industry": "Banking"}
+    for cat, values in scores.items():
+        detail = scoring.category_detail(
+            [(1, {f"{cat[0]}{i + 1}": v for i, v in enumerate(values) if v})],
+            [f"{cat[0]}{i + 1}" for i in range(len(values))])
+        if not method:
+            detail.pop("method")
+            for r in detail["kpis"]:
+                r.pop("score")
+        coverage[cat] = detail
+        final[f"{scoring.PREFIX[cat]}_score"] = detail["score"]
+    final["kpi_coverage"] = coverage
+    if method:
+        final["scoring_method"] = "kpi_score"
+    weights = scoring.weights_for(final)
+    final["composite_score"] = scoring.composite_score(
+        final["environmental_score"], final["social_score"], final["governance_score"], weights)
+    scoring.grade_all(final)
+    return db.esg_submissions.insert_one({"company_name": "Acme", "final": final}).inserted_id
+
+
+def test_report_kpi_score_edit_recomputes_pillar_overall_and_grade(admin_client, db):
+    sid = _kpi_submission(db)
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    got = admin_client.get(base).json()
+    assert got["kpis_editable"] == {"E": True, "S": True, "G": True}
+    assert got["kpis"]["E"] == [
+        {"kpi": "E1", "score": 80.0, "original_score": 80.0, "pages": [1]},
+        {"kpi": "E2", "score": 40.0, "original_score": 40.0, "pages": [1]},
+    ]
+
+    body = {"kpi_scores": {"E": {"E2": 100, "E1": 80}}}  # E1 equals the AI score: no override
+    prev = admin_client.post(f"{base}/preview", json=body).json()
+    f = prev["effective"]["final"]
+    assert f["environmental_score"] == 90  # (80 + 100) / 200
+    assert f["composite_score"] == pytest.approx(0.35 * 90 + 0.30 * 30 + 0.35 * 70)
+    assert f["kpi_coverage"]["Environment"]["kpis"][1] == {
+        "kpi": "E2", "score": 100.0, "points": 100.0, "level": "strong", "pages": [1]}
+    assert f["environmental_score_performance"] == "A"
+    assert prev["kpis"]["E"][1] == {"kpi": "E2", "score": 100.0, "original_score": 40.0, "pages": [1]}
+
+    saved = admin_client.put(f"{base}/edits", json=body).json()
+    assert saved["edits"]["kpi_scores"]["E"] == {"E2": 100.0} and saved["edited"] is True
+    assert db.esg_submissions.find_one({"_id": sid})["final"]["environmental_score"] == 90
+
+    # A pillar set by hand still wins over KPI scores.
+    over = admin_client.post(f"{base}/preview", json={**body, "pillar_overrides": {"E": 50}}).json()
+    assert over["effective"]["final"]["environmental_score"] == 50
+
+    assert admin_client.delete(f"{base}/edits").json()["effective"]["final"]["environmental_score"] == 60
+
+
+def test_report_kpi_score_validation(admin_client, db):
+    sid = _kpi_submission(db)
+    url = f"/api/admin/esg/submissions/{sid}/report/preview"
+    for bad in ({"E": {"E1": 101}}, {"E": {"E1": -1}}, {"E": {"E1": "8"}}, {"E": {"Nope": 5}}, {"X": {"E1": 5}}):
+        assert admin_client.post(url, json={"kpi_scores": bad}).status_code == 422
+
+
+def test_report_kpi_score_on_older_report_keeps_old_weights(admin_client, db):
+    sid = _kpi_submission(db, method=False)
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    got = admin_client.get(base).json()
+    assert got["kpis_editable"] == {"E": True, "S": True, "G": True}
+    assert [r["score"] for r in got["kpis"]["S"]] == [100.0, 0.0]
+    f = admin_client.post(f"{base}/preview", json={"kpi_scores": {"S": {"S2": 70}}}).json()["effective"]["final"]
+    assert f["social_score"] == 85
+    assert f["composite_score"] == pytest.approx(0.30 * 75 + 0.30 * 85 + 0.40 * 50)
+
+
+def test_report_kpi_score_locked_without_kpi_assessment(admin_client, db):
+    sid = db.esg_submissions.insert_one({"company_name": "Old", "final": {
+        "environmental_score": 50, "social_score": 50, "governance_score": 50, "composite_score": 50,
+        "sector": "", "industry": "",
+    }}).inserted_id
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    assert admin_client.get(base).json()["kpis_editable"] == {"E": False, "S": False, "G": False}
+    assert admin_client.post(f"{base}/preview", json={"kpi_scores": {"E": {"E1": 5}}}).status_code == 422
+
+
+def test_export_csv_adds_page_scores_and_kpi_summary(admin_client, db):
+    from app.esg import scoring
+    cid = ObjectId()
+    detail = scoring.category_detail([(2, {"E1": 32, "E2": 80})], ["E1", "E2", "E3"])
+    final = {"scoring_method": "kpi_score", "kpi_coverage": {"Environment": detail},
+             "environmental_score": detail["score"], "composite_score": 37.33, "composite_score_performance": "D"}
+    db.esg_report.insert_one({"company_id": cid, "composite_score": 37.33, "analysis": [
+        {"filename": "r.pdf", "category": "Environment", "text": "t", "page_no": 2, "page_score": 56.0,
+         "kpis": ["E2 (80)", "E1 (32)"],
+         "analysis": json.dumps({"reason": "r", "score": 90, "positive_keywords": [], "negative_keywords": []})},
+        final,
+    ]})
+    lines = admin_client.get(f"/api/admin/esg/export_csv/{cid}").text.splitlines()
+    assert lines[1] == "r.pdf,Environment,t,2,r,56.0,E2 (80); E1 (32),,"
+    assert lines[3:] == [
+        "Category,KPI,Best Score,Found on Pages",
+        "Environment,E1,32,2",
+        "Environment,E2,80,2",
+        "Environment,E3,0,-",
+        "Environment total,,37.33,",
+        "Overall,35% Environment + 30% Social + 35% Governance,37.33,Grade D",
+    ]
