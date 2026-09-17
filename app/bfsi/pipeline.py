@@ -279,16 +279,20 @@ SCORING_PROMPT = kpi_scoring.with_score_guide(CATEGORY_PROMPT)
 
 
 def load_criteria() -> dict:
-    """{E|S|G: numbered KPI list} for the scoring prompts, read from esg_prompts on every
-    analysis -- the same KPIs the ESG calculator scores against, kept in the database so
-    they can grow without a code change. The CRITERIA above are only the fallback for a
-    category whose prompt is missing or has no numbered list."""
+    """{E|S|G: numbered KPI list} for the scoring prompts, read on every analysis -- the
+    same KPIs the ESG calculator scores against. First choice: the esg_kpis metrics,
+    grouped under their Sub Pillar and Sub Pillar 1 (app/esg/scoring.py). Else the
+    esg_prompts prompt's numbered list; the CRITERIA above are the last fallback."""
     lists = load_kpi_lists()
     out = {}
     for c in ADJECTIVES:
+        metrics = kpi_scoring.load_kpis(CAT_NAMES[c])
+        if metrics:
+            out[c] = kpi_scoring.kpi_list_text(metrics)
+            continue
         kpis = lists.get(CAT_NAMES[c]) or []
         if not kpis:
-            logger.error("bfsi: no KPI list for %s in esg_prompts; using the built-in criteria", CAT_NAMES[c])
+            logger.error("bfsi: no KPI list for %s in esg_kpis or esg_prompts; using the built-in criteria", CAT_NAMES[c])
         out[c] = "\n".join(f"{i}. {k}" for i, k in enumerate(kpis, 1)) if kpis else CRITERIA[c]
     return out
 

@@ -83,7 +83,7 @@ Steps 1 to 4 are the same as the ESG calculator.
 | 40–60 | C Average | Caution: enhanced ESG due diligence recommended |
 | Below 40 | D Below Average | High risk: detailed review before lending |
 
-The KPI lists are the same as the ESG calculator: Environment 18, Social 18 and Governance 17.
+The KPIs are the same as the ESG calculator: our ESG metrics sheet, stored in the database (`esg_kpis`). Environment has 125 metrics, Social 129 and Governance 82, each grouped as **Pillar → Sub Pillar → Sub Pillar 1 → Metric** (for example E → Water → Water II → Water withdrawn). The AI gets each metric with its Sub Pillar and Sub Pillar 1, so it understands what the metric is about. The 5 "Meta" rows (company facts such as auditor name and contact details) are not scored.
 
 ## Example
 

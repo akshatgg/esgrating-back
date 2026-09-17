@@ -548,3 +548,17 @@ def test_get_client_is_cached_per_key_and_model(monkeypatch):
     assert oc.get_client() is a and a.api_key == "sk-1" and a.model == "gpt-4o-mini"
     monkeypatch.setattr(settings, "bfsi_openai_api_key", "sk-2")
     assert oc.get_client() is not a
+
+
+def test_criteria_come_from_esg_kpis_with_sub_pillar_context(db, fake):
+    for order, (sp, sp1, m) in enumerate([("Water", "Water I", "Water targets"), ("Water", "Water II", "Water withdrawn")], 1):
+        for pillar in "ESG":
+            db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
+                                    "order": order, "is_meta": False})
+    out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
+    first = fake.batches[0][0]
+    assert "Sub Pillar: Water\n  Sub Pillar 1: Water I\n    1. Water targets\n  Sub Pillar 1: Water II\n    2. Water withdrawn" in first
+    assert "Renewable energy usage initiatives." not in first
+    # Same flow: UNIT scores point 1 = 90, point 2 = 30 -> (90 + 30) / 200 -> 60
+    assert out["e_score"] == 60.0
+    assert [k["kpi"] for k in out["kpi_coverage"]["Environment"]["kpis"]] == ["Water targets", "Water withdrawn"]
