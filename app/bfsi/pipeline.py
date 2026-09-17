@@ -12,10 +12,9 @@ import logging
 import re
 
 from app.bfsi.openai_client import BfsiOpenAiFatal, get_client
-from app.core.kpis import (
-    coverage_detail, kpi_strengths, kpis_from_response, load_kpi_lists, parse_kpi_list, with_kpi_field,
-)
+from app.core.kpis import load_kpi_lists, parse_kpi_list
 from app.core.rounding import php_round
+from app.esg import scoring as kpi_scoring
 
 logger = logging.getLogger(__name__)
 
@@ -272,10 +271,11 @@ def modal(results: list, field: str) -> str:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-# Added (2026-09-11): scoring is KPI-based (app/core/kpis.py). The scoring prompt gains a
-# last response field asking which of the CRITERIA points the unit was scored on, so the
-# score and the page-scores export's "KPIs Present" come from the same answer.
-SCORING_PROMPT = with_kpi_field(CATEGORY_PROMPT)
+# KPI scoring, the same as the ESG calculator (app/bfsi/scoring.py,
+# docs/BFSI_SCORING_METHODOLOGY.md): the scoring prompt gains the 0-100 KPI score guide, so
+# each unit's answer scores every CRITERIA point it addresses. The score guide has no "%",
+# so the sprintf placeholders are untouched.
+SCORING_PROMPT = kpi_scoring.with_score_guide(CATEGORY_PROMPT)
 
 
 def load_criteria() -> dict:
@@ -316,26 +316,30 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
         # One request per page, all in flight together. A unit whose retries were all
         # exhausted comes back None and is simply left out of the average.
         results = []
+        kpis = kpi_lists[CAT_NAMES[cat]]
+        unit_kpis = []   # (page_no, {KPI: 0-100}) per unit
         for i, r in get_client().batch(prompts).items():
             if not isinstance(r, dict):
                 continue
             r["page_no"] = units[i]["page_no"]     # page travels with the score
+            scored = kpi_scoring.page_kpi_scores(r, kpis)
+            # The page score is the average of its KPI scores (reference only); it
+            # replaces the AI's own number everywhere the page is shown.
+            r["page_score"] = kpi_scoring.page_score(scored)
+            unit_kpis.append((r["page_no"], scored))
             results.append(r)
             if page_rows is not None:
                 page_rows[i]["categories"][CAT_NAMES[cat]] = {
-                    "score": r.get("score"),
+                    "score": r["page_score"],
                     "reason": _s(r.get("reason")).strip(_PHP_TRIM),
                     "positive_keywords": pool([r], "positive_keywords", 1000),
                     "negative_keywords": pool([r], "negative_keywords", 1000),
-                    "kpis": kpis_from_response(r, kpi_lists[CAT_NAMES[cat]]),
+                    "kpis": kpi_scoring.kpi_labels(scored, kpis),
                 }
-        # KPI coverage (app/core/kpis.py): how well the whole report proves this category's
-        # CRITERIA points, from the KPIs each unit's scoring answer named -- not the average
-        # of the unit scores.
-        kpis = kpi_lists[CAT_NAMES[cat]]
-        detail = coverage_detail([(r.get("page_no"), kpi_strengths(r, kpis)) for r in results], kpis)
-        scores[cat] = php_round(detail["score"], 2)
-        detail["score"] = scores[cat]
+        # Category score: every KPI's best score as a percentage of the maximum -- never
+        # the average of the unit scores.
+        detail = kpi_scoring.category_detail(unit_kpis, kpis)
+        scores[cat] = detail["score"]
         kpi_coverage[CAT_NAMES[cat]] = detail   # the report's KPI Assessment
         # Positives are ranked by a follow-up call, as the ESG calculator does.
         # Negatives are not — matching it exactly; flip this to rank them too if wanted.
@@ -351,7 +355,7 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
             reasons[cat].append({
                 # PHP (int) cast: a page that arrived without a usable page_no is 0.
                 "page": int(float(r["page_no"])) if _is_numeric(r["page_no"]) else 0,
-                "score": float(r["score"]) if _is_numeric(r.get("score")) else None,
+                "score": float(r["page_score"]),
                 "reason": text,
             })
         all_results.extend(results)
@@ -387,6 +391,7 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
         "climate_risk": q("climate_risk", ""),
         "governance_summary": q("governance_summary", ""),
         "key_metrics": q("key_metrics", []),
-        # Added: every KPI's best level, points and pages, per category (app/core/kpis.py).
+        # Every KPI's best score and pages, per category (app/bfsi/scoring.py).
         "kpi_coverage": kpi_coverage,
+        "scoring_method": kpi_scoring.METHOD,
     }

@@ -207,10 +207,10 @@ def grade_all(final: dict) -> None:
 SUMMARY_HEADER = ["Category", "KPI", "Best Score", "Found on Pages"]
 
 
-def summary_rows(final: dict | None) -> list[list]:
-    """The rows under the page rows of the page-scores CSV: every KPI's best score and
-    pages, each category's total and the overall score with its grade and weights."""
-    coverage = (final or {}).get("kpi_coverage")
+def kpi_summary_rows(coverage, totals: dict, weights_label: str, overall, grade: str) -> list[list]:
+    """The rows under the page rows of a page-scores CSV: every KPI's best score and
+    pages, each category's total, and the overall score with its weights and grade.
+    Shared by the ESG and BFSI calculators. totals is {category name: score}."""
     if not isinstance(coverage, dict) or not coverage:
         return []
     rows = [[], SUMMARY_HEADER]
@@ -221,9 +221,20 @@ def summary_rows(final: dict | None) -> list[list]:
         for r in detail.get("kpis") or []:
             pages = ", ".join(str(p) for p in r.get("pages") or []) or "-"
             rows.append([cat, r.get("kpi", ""), _num(kpi_best(r)), pages])
-        rows.append([f"{cat} total", "", _num(float(final.get(f"{PREFIX[cat]}_score", 0) or 0)), ""])
-    w = weights_for(final)
-    weights = " + ".join(f"{round(w[c] * 100)}% {c}" for c in CATEGORIES)
-    overall = float(final.get("composite_score", 0) or 0)
-    rows.append(["Overall", weights, f"{overall:.2f}", f"Grade {final.get('composite_score_performance', '')}"])
+        rows.append([f"{cat} total", "", _num(float(totals.get(cat) or 0)), ""])
+    rows.append(["Overall", weights_label, f"{float(overall or 0):.2f}", f"Grade {grade}"])
     return rows
+
+
+def weights_label(weights: dict) -> str:
+    """"35% Environment + 30% Social + 35% Governance" from fractions or percentages."""
+    as_pct = all(v > 1 for v in weights.values())
+    return " + ".join(f"{round(weights[c] if as_pct else weights[c] * 100)}% {c}" for c in CATEGORIES)
+
+
+def summary_rows(final: dict | None) -> list[list]:
+    """The ESG CSV summary for a result (final_report_data)."""
+    final = final or {}
+    totals = {c: final.get(f"{PREFIX[c]}_score", 0) for c in CATEGORIES}
+    return kpi_summary_rows(final.get("kpi_coverage"), totals, weights_label(weights_for(final)),
+                            final.get("composite_score"), final.get("composite_score_performance", ""))

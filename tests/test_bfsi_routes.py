@@ -56,8 +56,8 @@ class FakeBfsiClient:
 
     def __init__(self, scores=None):
         self.scores = scores or {"environmental": 70.0, "social": 60.0, "governance": 50.0}
-        # KPIs each scoring answer proves (strongly): all 18 Environment points, 9 of the 18
-        # Social points, no Governance points -> KPI coverage 100 / 50 / 0.
+        # KPIs each scoring answer scores 100: all 18 Environment points, 9 of the 18
+        # Social points, no Governance points -> category scores 100 / 50 / 0.
         self.kpis = {"environmental": list(range(1, 19)), "social": list(range(1, 10)), "governance": []}
         self.batch_calls = 0
         self.json_calls = 0
@@ -73,7 +73,7 @@ class FakeBfsiClient:
                         "reason": "why", "score": score,
                         "positive_keywords": ["k1", "k2"], "negative_keywords": ["n1"],
                         "sector": "finance", "industry": "banking",
-                        "kpis_strong": self.kpis.get(adj, []),
+                        "kpi_scores": [[n, 100] for n in self.kpis.get(adj, [])],
                     }
                     break
         return out
@@ -502,10 +502,19 @@ def test_admin_export_page_scores_csv(admin_client, db, fake_bfsi, monkeypatch):
     assert resp.status_code == 200
     lines = resp.text.splitlines()
     assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords"
-    rows = list(csv.reader(lines[1:]))
+    blank = lines.index("")
+    rows = list(csv.reader(lines[1:blank]))
     assert rows and [r[1] for r in rows] == sorted(
         (r[1] for r in rows), key=["Environment", "Social", "Governance"].index)
     assert all(r[4] == "why" and r[7] == "k1, k2" and r[8] == "n1" for r in rows)
+    # Page score = average of the page's KPI scores (100), not the AI's own number.
+    assert {r[1]: r[5] for r in rows} == {"Environment": "100.0", "Social": "100.0", "Governance": "0.0"}
+    summary = list(csv.reader(lines[blank + 1:]))
+    assert summary[0] == ["Category", "KPI", "Best Score", "Found on Pages"]
+    assert ["Environment total", "", "100", ""] in summary and ["Social total", "", "50", ""] in summary
+    # Term Loan -> Working Capital weights 20/30/50: 20 + 15 + 0 = 35 -> D
+    assert summary[-1] == ["Overall", "Working Capital: 20% Environment + 30% Social + 50% Governance",
+                           "35.00", "Grade D"]
 
     # A cache hit reuses the cached page rows, so the export is unchanged.
     admin_client.post(f"/api/admin/bfsi/submissions/{sub_id}/analyze?use_cache=true")
@@ -708,3 +717,47 @@ def test_admin_send_rejects_non_pdf_content(admin_client, db, monkeypatch):
     )
     assert resp.status_code == 422
     assert resp.json()["detail"] == "File content does not match its type."
+
+
+# --- report editor: KPI scores ----------------------------------------------------------
+
+def _kpi_scored_bfsi(db, method=True):
+    from app.esg.scoring import category_detail
+    coverage, scores = {}, {}
+    for cat, key, values in (("Environment", "e_score", [80, 40]), ("Social", "s_score", [60, 0]),
+                             ("Governance", "g_score", [90, 50])):
+        detail = category_detail([(1, {f"{cat[0]}{i + 1}": v for i, v in enumerate(values) if v})],
+                                 [f"{cat[0]}{i + 1}" for i in range(len(values))])
+        coverage[cat], scores[key] = detail, detail["score"]
+    ai = {**scores, "kpi_coverage": coverage, "reasons": {"E": [], "S": [], "G": []}}
+    if method:
+        ai["scoring_method"] = "kpi_score"
+    return _seed_submission(db, ai_analysis=ai, **scores, loan_type="Agriculture Loan")
+
+
+def test_bfsi_report_kpi_score_edit_recomputes_overall_grade_and_recommendation(admin_client, db):
+    sid = _kpi_scored_bfsi(db)
+    base = f"/api/admin/bfsi/submissions/{sid}/report"
+    got = admin_client.get(base).json()
+    assert got["kpis_editable"] == {"E": True, "S": True, "G": True}
+    assert [r["score"] for r in got["kpis"]["E"]] == [80.0, 40.0]
+    # Agriculture 50/25/25: 0.5*60 + 0.25*30 + 0.25*70 = 55 -> C
+    assert got["effective"]["overall"]["overall"] == 55.0
+
+    body = {"kpi_scores": {"E": {"E2": 100}}}
+    eff = admin_client.post(f"{base}/preview", json=body).json()["effective"]
+    assert eff["e_score"] == 90  # (80 + 100) / 200
+    assert eff["overall"]["overall"] == 70.0 and eff["overall"]["grade"] == "B"  # 45 + 7.5 + 17.5
+    assert eff["recommendation"] == "Moderate — lend with standard ESG conditions"
+    assert eff["ai_analysis"]["kpi_coverage"]["Environment"]["kpis"][1]["score"] == 100.0
+
+    admin_client.put(f"{base}/edits", json=body)
+    doc = db.bfsi_submissions.find_one({"_id": sid})
+    assert doc["e_score"] == 90 and doc["grade"] == "B"
+    assert admin_client.delete(f"{base}/edits").json()["effective"]["e_score"] == 60
+
+
+def test_bfsi_report_kpi_score_rejects_out_of_range(admin_client, db):
+    sid = _kpi_scored_bfsi(db)
+    url = f"/api/admin/bfsi/submissions/{sid}/report/preview"
+    assert admin_client.post(url, json={"kpi_scores": {"E": {"E1": 101}}}).status_code == 422
