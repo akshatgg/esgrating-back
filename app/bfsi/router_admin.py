@@ -378,6 +378,7 @@ def export_page_scores(id: str, admin: str = Depends(require_admin)):
                 kpis_cell(result.get("kpis")),
                 keywords_cell(result.get("positive_keywords")),
                 keywords_cell(result.get("negative_keywords")),
+                result.get("review", ""),
             ])
     if all(k in doc for k in ("e_score", "s_score", "g_score")):
         rows.extend(bfsi_scoring.summary_rows(doc.get("ai_analysis"), doc["e_score"], doc["s_score"],

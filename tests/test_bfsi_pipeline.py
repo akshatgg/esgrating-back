@@ -29,15 +29,25 @@ QUAL = {
 class FakeClient:
     """Stand-in for OpenAiJson: records every prompt, returns canned JSON."""
 
-    def __init__(self, responder=None, json_responder=None):
+    def __init__(self, responder=None, json_responder=None,
+                 categories=("Environment", "Social", "Governance")):
         self.batches = []
         self.json_calls = []
         self._responder = responder or (lambda key, prompt: dict(UNIT))
         self._json_responder = json_responder or _default_json
+        self.categories = list(categories)   # step 0: the categories every unit is about
 
     def batch(self, prompts, concurrency=8):
         self.batches.append(dict(prompts))
+        if prompts and all('"categories"' in p for p in prompts.values()):
+            return {k: {"categories": list(self.categories)} for k in prompts}
         return {k: self._responder(k, p) for k, p in prompts.items()}
+
+    @property
+    def scoring_batches(self):
+        """The three category batches, without the step 0 classification batch."""
+        return [b for b in self.batches
+                if not (b and all('"categories"' in p for p in b.values()))]
 
     def json(self, user, system=""):
         self.json_calls.append((user, system))
@@ -46,7 +56,7 @@ class FakeClient:
     # convenience for assertions
     @property
     def unit_prompts(self):
-        return [p for b in self.batches for p in b.values()]
+        return [p for b in self.scoring_batches for p in b.values()]
 
     @property
     def keyword_prompts(self):
@@ -191,15 +201,33 @@ Provide the response in JSON format with the following fields:
 Text:
 %3$s"""
     pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    first = fake.batches[0][0]
+    first = fake.scoring_batches[0][0]
     assert first.startswith("Analyze the following text for environmental performance. Evaluate the text based on:\n")
     assert pipeline.CRITERIA["E"] in first
     assert first.endswith("\nText:\nalpha beta")
-    assert '- "score": A number between 0 and 100.' in first
+    # The leftover page-score fields are dropped from the prompt as it is sent: the KPI
+    # scores are the marks, and "reason" and the keyword lists now explain those marks.
+    assert '- "score": A number between 0 and 100.' not in first
+    assert '- "reason": A Detailed explanation of the score.' not in first
     assert '- "kpi_scores": A list of [point number, score] pairs' in first and "81-100:" in first
+    assert '- "reason": One short line for each point you scored' in first
+    assert '- "positive_keywords": The words or short phrases from this text that earned' in first
+    assert '- "negative_keywords": The words or short phrases from this text that show poor' in first
     assert "%1$s" not in first and "%2$s" not in first and "%3$s" not in first
-    assert fake.batches[1][0].startswith("Analyze the following text for social performance.")
-    assert fake.batches[2][0].startswith("Analyze the following text for governance performance.")
+    assert fake.scoring_batches[1][0].startswith("Analyze the following text for social performance.")
+    assert fake.scoring_batches[2][0].startswith("Analyze the following text for governance performance.")
+
+
+def test_only_the_categories_a_unit_is_about_are_scored(monkeypatch):
+    """Step 0, the same as the ESG calculator: a unit is classified first and only that
+    category's KPIs are matched against it."""
+    c = use(monkeypatch, FakeClient(categories=["Environment"]))
+    out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
+    assert len(c.scoring_batches) == 1
+    assert all("environmental performance" in p for p in c.scoring_batches[0].values())
+    # UNIT scores point 1 = 90 and point 2 = 30 of the 18 built-in E criteria: 120 / 1800.
+    assert out["e_score"] == 6.67 and out["s_score"] == 0.0 and out["g_score"] == 0.0
+    assert out["scoring_method"] == "kpi_score"
 
 
 # --------------------------------------------------------------------------- units / helpers
@@ -276,7 +304,7 @@ def test_select_keywords_reraises_fatal(monkeypatch):
 
 def test_two_pages_produce_six_category_calls(fake):
     pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert len(fake.batches) == 3
+    assert len(fake.scoring_batches) == 3   # one per category; step 0 classification is separate
     assert len(fake.unit_prompts) == 6
 
 
@@ -556,7 +584,7 @@ def test_criteria_come_from_esg_kpis_with_sub_pillar_context(db, fake):
             db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": m,
                                     "order": order, "is_meta": False})
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    first = fake.batches[0][0]
+    first = fake.scoring_batches[0][0]
     assert "Sub Pillar: Water\n  Sub Pillar 1: Water I\n    1. Water targets\n  Sub Pillar 1: Water II\n    2. Water withdrawn" in first
     assert "Renewable energy usage initiatives." not in first
     # Same flow: UNIT scores point 1 = 90, point 2 = 30 -> (90 + 30) / 200 -> 60

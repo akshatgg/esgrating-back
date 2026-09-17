@@ -1,10 +1,15 @@
 # app/esg/scoring.py -- the ESG calculator's scoring, all in one place.
-# Methodology: docs/ESG_SCORING_METHODOLOGY.md (user, 2026-09-17). ESG only; BFSI keeps
+# Methodology: docs/ESG_SCORING_METHODOLOGY.md (user, 2026-09-18). ESG only; BFSI keeps
 # its own scoring (app/core/kpis.py, app/bfsi/scoring.py).
 #
-#   1. KPI on a page -> the AI scores every KPI the page addresses, 0-100 (SCORE_GUIDE)
-#   2. KPI           -> its best score on any page; a KPI found nowhere scores 0
-#   3. category      -> total of best scores / (number of KPIs x 100) x 100
+#   0. page          -> the categories the page has content about (CLASSIFY_GUIDE); a page
+#                       with no ESG content is not scored at all
+#   1. KPI on a page -> for those categories only, the AI scores each KPI the page shows
+#                       performance for, 0-100 on how GOOD it is (SCORE_GUIDE)
+#   2. KPI           -> its best score on any page, capped at CAP_SCORE when any page
+#                       showed poor performance; a KPI found nowhere scores 0
+#   3. category      -> the average of ALL its KPI scores, missing ones included as 0
+#                       (total of the scores / (number of KPIs x 100) x 100 is that average)
 #   4. overall       -> 35% Environment + 30% Social + 35% Governance
 #   5. grade         -> evaluate_score
 #
@@ -33,19 +38,97 @@ MAX_SCORE = 100.0
 
 # Added to each category's scoring prompt, after its response fields. No braces: the
 # prompt is .format()ted with the page text.
+#
+# The score says how GOOD the performance is, not how much detail is written (user,
+# 2026-09-18: "u dont have to score on that basisi u have to score on the basiss of kpis
+# delts is good or not whatever is written in the page" / "if only mention so still u have
+# to give 0").
 SCORE_GUIDE = (
-    '- "kpi_scores": A list of [point number, score] pairs, one for each evaluation point '
-    'listed above that this text addresses, each scored from 0 to 100:\n'
-    '  1-30: only mentioned, with no detail\n'
-    '  31-60: a policy or commitment is described\n'
-    '  61-80: specific actions or programmes are described\n'
-    '  81-100: measured data, or targets with progress against them\n'
-    'Leave out the points this text does not address. Use an empty list if it addresses none.'
+    '- "kpi_scores": A list of [point number, score] pairs for the evaluation points listed '
+    'above that this text says something about. Score each from 0 to 100 on how GOOD the '
+    "company's performance on that point is, judged from what this text shows:\n"
+    '  0: you cannot judge the performance -- the point is only named, listed or mentioned, only '
+    'promised, planned or pending, or the text says too little to tell whether it is good\n'
+    '  1-20: poor -- fines, penalties, lawsuits, incidents, accidents, a worsening trend, or an '
+    'admitted failure\n'
+    '  21-40: weak -- something is being done, but it is early, partial or thin, with no result\n'
+    '  41-60: moderate -- real actions or programmes are in place, but no measured result\n'
+    '  61-80: good -- measured results, or real progress against a target\n'
+    '  81-100: strong -- targets met, a measured improvement, independent assurance or certification\n'
+    'Judge how good the performance is, never how much detail is written. Leave out the points '
+    'this text says nothing about, and use an empty list if it says nothing about any of them.\n'
+    '- "reason": One short line for each point you scored, in the form '
+    '"<point number> <score>: <what this text shows about that point>" -- for example '
+    '"18 85: Scope 1 and 2 emissions down 22 percent against a 2030 target". Nothing else: no '
+    'overall score and no overall verdict for the page.\n'
+    '- "positive_keywords": The words or short phrases from this text that earned the higher '
+    'scores above -- the measured results, targets met, certifications or assurance you saw. '
+    'Quote the text, do not invent a phrase, and use an empty list if nothing earned a score.\n'
+    '- "negative_keywords": The words or short phrases from this text that show poor '
+    'performance -- the fines, penalties, lawsuits, incidents, accidents or worsening numbers '
+    'behind any score of 1 to 20. Quote the text, and use an empty list if there are none.'
 )
+
+# The response fields SCORE_GUIDE replaces. The scoring prompt (esg_prompts for ESG,
+# CATEGORY_PROMPT for BFSI) still asks for an overall page "score", for a "reason" that
+# explains that score, and for keywords that "influenced the score" -- all left over from
+# before KPI scoring. The page score is never used (a page's score is the average of its
+# KPI scores), and a reason or a keyword list about it contradicts the KPI marks in the
+# same row. So those lines are dropped from the prompt as it is sent, and SCORE_GUIDE
+# defines reason and both keyword lists against the KPI scores instead. The stored
+# templates are never modified.
+_DROP_FIELDS = re.compile(r'(?m)^- "(?:score|reason|positive_keywords|negative_keywords)":.*\n?')
+
+# Step 0: which categories the page is about, so only those categories' KPIs are matched
+# against it (user, 2026-09-18: "Firstly, you have to analyse whether that thing lies in
+# which category ... After that, you will have to match the KPIs"). A page can be in more
+# than one category; a page with no ESG content is not scored at all.
+CLASSIFY_GUIDE = (
+    "Read the page below from a company report and say which ESG categories it has real "
+    "content about.\n"
+    "- Environment: emissions, energy, water, waste, pollution, biodiversity, climate, "
+    "resource use, environmental compliance.\n"
+    "- Social: employees, health and safety, training, diversity, human rights, labour, "
+    "communities, customers, product safety and access.\n"
+    "- Governance: board, directors, ethics, anti-corruption, audit, risk, shareholders, "
+    "remuneration, transparency, regulatory compliance.\n"
+    "Name a category only if the page says something about the company's own performance, "
+    "practices or data in it. Leave every category out for a cover page, an index, a "
+    "photograph caption, a purely financial table or anything else with no ESG content.\n"
+    'Answer in JSON with one field:\n'
+    '- "categories": a list holding any of "Environment", "Social", "Governance", or an '
+    "empty list."
+)
+
+
+def classify_prompt(text: str) -> str:
+    """The step 0 prompt for one page. Built by concatenation, not .format(), so page text
+    containing braces or % signs is safe in both pipelines."""
+    return CLASSIFY_GUIDE + "\n\nPage:\n" + text
+
+
+def parse_categories(parsed) -> list[str]:
+    """The categories from a step 0 answer, in CATEGORIES order. Junk and unknown names
+    are dropped. None means the answer could not be read at all, so the caller falls back
+    to scoring every category rather than silently skipping the page."""
+    if not isinstance(parsed, dict):
+        return None
+    raw = parsed.get("categories")
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    if not isinstance(raw, (list, tuple)):
+        return None
+    named = {str(c).strip().lower() for c in raw if isinstance(c, (str, int, float))}
+    return [c for c in CATEGORIES if c.lower() in named or PILLAR_CODES[c].lower() in named]
+
 
 # Strengths and Gaps in the report: the score bands above, named.
 STRONG_FROM = 61
 
+# Poor performance anywhere caps the KPI (user, 2026-09-18). A fine on page 30 cannot be
+# cancelled out by a good claim on page 4.
+POOR_TO = 20
+CAP_SCORE = 20.0
 
 # --- 0. The KPI list --------------------------------------------------------------------------
 
@@ -95,11 +178,11 @@ def with_kpi_list(prompt: str, kpis: list[dict]) -> str:
 
 def with_score_guide(prompt: str) -> str:
     """The category's scoring prompt with SCORE_GUIDE after its response fields (before
-    "Text:"). Apply it to the template, before the page text is filled in."""
+    "Text:"), and without the leftover "score" and "reason" fields it replaces
+    (_DROP_FIELDS). Apply it to the template, before the page text is filled in."""
     i = prompt.rfind("\n\nText:")
-    if i == -1:
-        return prompt + "\n" + SCORE_GUIDE
-    return prompt[:i] + "\n" + SCORE_GUIDE + prompt[i:]
+    head, tail = (prompt, "") if i == -1 else (prompt[:i], prompt[i:])
+    return _DROP_FIELDS.sub("", head).rstrip("\n") + "\n" + SCORE_GUIDE + (tail or "\n")
 
 
 def _score(value) -> float | None:
@@ -143,6 +226,47 @@ def page_score(scores: dict[str, float]) -> float:
     return round(sum(scores.values()) / len(scores), 2)
 
 
+# The reason lines SCORE_GUIDE asks for: "<point number> <score>: <what the text shows>".
+# The score is optional and a few separators are tolerated, because that is the part of the
+# answer models are loosest about.
+_REASON_LINE = re.compile(r"(?m)^\W*(\d+)\s*[ ,\-]?\s*(\d+(?:\.\d+)?)?\s*[:\-]\s*(\S.*?)\s*$")
+
+
+def kpi_reasons(parsed, kpis: list[str]) -> dict[str, str]:
+    """{KPI name: why it scored what it scored} from one page's answer. The scoring call
+    writes one line per KPI it scored (SCORE_GUIDE), so the evidence for a score travels
+    with it into the report, the CSV and the rating summary -- no extra call.
+
+    An answer whose "reason" is one block of prose about the whole page gives {}: there is
+    no way to tell which KPI it belongs to, so nothing is attributed to any of them."""
+    if not isinstance(parsed, dict):
+        return {}
+    text = parsed.get("reason")
+    if not isinstance(text, str):
+        return {}
+    out = {}
+    for number, _score, line in _REASON_LINE.findall(text):
+        names = _names([number], kpis)
+        if names and names[0] not in out:
+            out[names[0]] = line
+    return out
+
+
+def contradiction(parsed, scores: dict[str, float]) -> str:
+    """"" or a note for a page whose own answer disagrees with itself: it lists negative
+    keywords (fines, penalties, spills, incidents) yet scored none of its KPIs as poor
+    performance (1-POOR_TO). Shown in the page-scores export as a row worth a human look;
+    it never changes a score."""
+    if not isinstance(parsed, dict) or not scores:
+        return ""
+    raw = parsed.get("negative_keywords")
+    negatives = [str(k).strip() for k in raw if str(k).strip()] if isinstance(raw, list) else []
+    if not negatives or min(scores.values()) <= POOR_TO:
+        return ""
+    return (f"Check: negative keywords ({', '.join(negatives[:5])}) but no KPI on this page "
+            f"scored 1-{int(POOR_TO)}")
+
+
 def kpi_labels(scores: dict[str, float], kpis: list[str]) -> list[str]:
     """A page's KPIs for the report and the CSV: "name (80)", highest score first."""
     ranked = sorted((k for k in kpis if k in scores), key=lambda k: -scores[k])
@@ -167,35 +291,81 @@ def category_score(best: dict[str, float]) -> float:
     return round(sum(best.values()) / (len(best) * MAX_SCORE) * 100, 2)
 
 
+def capped_score(scores: list[float]) -> tuple[float, bool]:
+    """A KPI's score from every page score it earned: its best, but held down to
+    CAP_SCORE when any page showed poor performance (1-POOR_TO). Returns the score and
+    whether the cap applied."""
+    scores = [s for s in scores if s > 0]
+    if not scores:
+        return 0.0, False
+    best = max(scores)
+    if best > CAP_SCORE and min(scores) <= POOR_TO:
+        return CAP_SCORE, True
+    return best, False
+
+
 def category_detail(pages: list, kpis: list[str]) -> dict:
-    """A category's KPI Assessment: every KPI with its best score and the pages it was
-    found on, and the category score. pages is [(page_no, {KPI name: 0-100})]."""
-    best = {k: 0.0 for k in kpis}
+    """A category's KPI Assessment: every KPI with its score, the pages it was found on and
+    the evidence for that score, plus the category score.
+
+    pages is [(page_no, {KPI name: 0-100})], or [(page_no, scores, {KPI name: reason})] to
+    carry the reason the scoring call gave for each KPI (kpi_reasons). A KPI takes its best
+    page score, capped when any page showed poor performance (capped_score); its evidence is
+    the page that produced the score it ends up with -- the poor page when it is capped."""
+    seen = {k: [] for k in kpis}
     found_on = {k: [] for k in kpis}
-    for page_no, scores in pages:
+    for page in pages:
+        page_no, scores = page[0], page[1]
+        reasons = page[2] if len(page) > 2 and isinstance(page[2], dict) else {}
         for k, v in scores.items():
-            if k not in best:
+            if k not in seen:
                 continue
-            best[k] = max(best[k], v)
+            seen[k].append((v, page_no, reasons.get(k, "")))
             if page_no is not None and page_no not in found_on[k]:
                 found_on[k].append(page_no)
-    return {
-        "method": METHOD,
-        "score": category_score(best),
-        "kpis": [kpi_row(k, best[k], sorted(found_on[k], key=page_sort_key)) for k in kpis],
-    }
+    final = {}
+    rows = []
+    for k in kpis:
+        score, capped = capped_score([v for v, _p, _r in seen[k]])
+        final[k] = score
+        rows.append(kpi_row(k, score, sorted(found_on[k], key=page_sort_key), capped,
+                            _evidence(seen[k], capped)))
+    return {"method": METHOD, "score": category_score(final), "kpis": rows}
 
 
-def kpi_row(kpi: str, score: float, pages: list) -> dict:
+def _evidence(entries: list, capped: bool) -> dict:
+    """{page, reason} of the page a KPI's final score came from: the worst page when the
+    score was capped, else the best. {} when the answer gave no reason for it."""
+    scored = [e for e in entries if e[0] > 0]
+    if not scored:
+        return {}
+    score, page, reason = min(scored) if capped else max(scored)
+    if not reason:
+        return {}
+    return {"page": page, "reason": reason, "score": score}
+
+
+def kpi_row(kpi: str, score: float, pages: list, capped: bool = False, evidence: dict | None = None) -> dict:
     # "points" is the score again: older reports and the web read points.
-    return {"kpi": kpi, "score": score, "points": score, "level": level(score), "pages": pages}
+    row = {"kpi": kpi, "score": score, "points": score, "level": level(score), "pages": pages}
+    if capped:
+        # Shown in the report and the CSV so a held-down score is never a surprise.
+        row["capped"] = True
+    if evidence:
+        # Why this KPI scored what it scored, from the same call that scored it.
+        row["evidence"] = evidence
+    return row
 
 
 def rescore_category(detail: dict, scores: dict[str, float]) -> dict:
     """The KPI Assessment with some KPI scores replaced (admin edits), and its score. The
     detail keeps its own method, so an older report keeps its older layout."""
     detail = dict(detail)
-    detail["kpis"] = [kpi_row(r["kpi"], scores.get(r["kpi"], kpi_best(r)), r.get("pages") or [])
+    # An analyst's own number replaces the AI's and is never capped again; an untouched
+    # row keeps the cap it was scored with.
+    detail["kpis"] = [kpi_row(r["kpi"], scores.get(r["kpi"], kpi_best(r)), r.get("pages") or [],
+                              bool(r.get("capped")) and r["kpi"] not in scores,
+                              None if r["kpi"] in scores else r.get("evidence"))
                       for r in detail.get("kpis") or []]
     detail["score"] = category_score({r["kpi"]: r["score"] for r in detail["kpis"]})
     return detail
@@ -282,6 +452,8 @@ def kpi_summary_rows(coverage, totals: dict, weights_label: str, overall, grade:
             continue
         for r in detail.get("kpis") or []:
             pages = ", ".join(str(p) for p in r.get("pages") or []) or "-"
+            if r.get("capped"):
+                pages += f" (capped at {_num(CAP_SCORE)}: poor performance found)"
             rows.append([cat, r.get("kpi", ""), _num(kpi_best(r)), pages])
         total = float(totals.get(cat) or 0)
         note = (f"Set by analyst (KPI total {_num(float(detail.get('score') or 0))})"

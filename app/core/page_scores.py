@@ -6,8 +6,10 @@ import io
 
 from fastapi.responses import StreamingResponse
 
+# "Review" is set only when a page's own answer disagrees with itself (negative keywords
+# but no poor KPI score -- app/esg/scoring.py contradiction).
 HEADER = ["Filename", "Category", "Text", "Page No", "Reason", "Score", "KPIs Present",
-          "Positive Keywords", "Negative Keywords"]
+          "Positive Keywords", "Negative Keywords", "Review"]
 
 
 def kpis_cell(kpis) -> str:

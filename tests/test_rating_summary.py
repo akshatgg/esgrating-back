@@ -106,7 +106,8 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     assert "Water | 65 | Good | Water withdrawn (90); Water related targets (40) | 2 of 2 KPIs found in the report" in text
     assert "Waste | 0 | Below Average | No KPI evidence found | 0 of 1 KPIs found in the report" in text
     # KPI table: 7 columns, strongest and gaps with their theme and pages
-    assert "Environment | Water | Water withdrawn | 90 | Found on p. 3 | Strong | Measured data or targets with progress" in text
+    assert ("Environment | Water | Water withdrawn | 90 | Found on p. 3 | Strong | "
+            "Strong: targets met, measured improvement or assurance") in text
     assert "Environment | Waste | Waste management policy | 0 | Not found in the report | Not found | Not found in the report" in text
     # Completeness: 4 of 7 KPIs found; specificity: 2 of 4 scored 81-100
     assert "Completeness | Share of the KPI library the report addresses | Moderate (57%) | 4 of 7 KPIs found in the report" in text
@@ -186,3 +187,23 @@ def test_summary_scorecard_shows_a_pillar_set_by_analyst(admin_client, db, fake_
     assert "Environment | 80 | A | Excellent (set by analyst; KPI total 43.33)" in text
     assert "ENVIRONMENT\n80\nA · Excellent" in text
     assert '"set_by_analyst": true' in fake_ai[-1][1]
+
+
+def test_gaps_name_the_themes_the_report_covers_before_the_ones_it_does_not(db):
+    """Which missing KPIs the summary talks about comes from the report's own evidence: a
+    theme it disclosed something in first, a theme with nothing found last. No hardcoded
+    list of metrics (user, 2026-09-18)."""
+    names = ["Water withdrawn", "Water targets", "Waste policy", "Waste recycled"]
+    for order, (sp, metric) in enumerate([("Water", names[0]), ("Water", names[1]),
+                                          ("Waste", names[2]), ("Waste", names[3])], 1):
+        db.esg_kpis.insert_one({"pillar": "E", "sub_pillar": sp, "sub_pillar_1": f"{sp} I",
+                                "metric": metric, "order": order, "is_meta": False})
+    # Only "Water withdrawn" is evidenced, so Water is the theme this report covers.
+    detail = scoring.category_detail([(3, {"Water withdrawn": 80})], names)
+    sid = db.esg_submissions.insert_one({"company_name": "Acme Ltd", "final": {
+        "scoring_method": "kpi_score", "kpi_coverage": {"Environment": detail},
+        "environmental_score": detail["score"], "social_score": 0, "governance_score": 0,
+        "composite_score": 0}}).inserted_id
+    facts = summary.build_facts("esg", db.esg_submissions.find_one({"_id": sid}))
+    gaps = [g["kpi"] for g in facts["pillars"]["E"]["gaps"]]
+    assert gaps == ["Water targets", "Waste policy", "Waste recycled"]

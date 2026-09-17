@@ -3,7 +3,14 @@
 ## Summary
 
 The BFSI calculator helps a lender judge the ESG risk of a borrower before giving a loan.
-It scores the borrower's report **exactly like the ESG calculator**: each KPI is scored from 0 to 100, and a KPI that is missing scores 0.
+It scores the borrower's report **exactly like the ESG calculator**:
+
+- every page is first placed in a category (Environment, Social, Governance, or more than one);
+- only that category's KPIs are then matched against the page;
+- each KPI found is scored 0 to 100 on **how good the performance is**, not on how much detail the report gives;
+- a KPI only mentioned, only promised, or too vague to judge scores **0**;
+- a KPI not found anywhere scores **0** and still counts;
+- each category score is the **average of all its KPI scores**.
 
 The only difference is the final step. The overall score uses **weights that depend on the loan type**. For example, a Renewable Energy Loan gives more weight to Environment than a Working Capital loan.
 
@@ -22,40 +29,48 @@ The overall score then gives a grade and a lending recommendation.
 Each page of the borrower's report
         │
         ▼
-AI scores each KPI found on that page (0–100)
+Step 0: which category is this page? (E, S, G, or several; none = page skipped)
         │
         ▼
-Each KPI keeps its best score from any page (not found = 0)
+Step 1: for those categories only, score each KPI the page shows (0–100, how good)
         │
         ▼
-Category score = total of best scores ÷ (number of KPIs × 100) × 100
+Step 2: each KPI keeps its best score (not found = 0; poor performance caps it at 20)
         │
         ▼
-Overall score = weights for the loan type (see table)
+Step 3: category score = average of all that category's KPI scores
+        │
+        ▼
+Step 4: overall score = weights for the loan type (see table)
         │
         ▼
 Grade + lending recommendation
 ```
 
-Steps 1 to 4 are the same as the ESG calculator.
+Steps 0 to 3 are the same as the ESG calculator.
 
-**Step 1. Score each KPI on every page.** The AI reads each page and scores every KPI it finds, using this guide:
+**Step 0. Place the page in a category.** One AI call per page asks which categories the page has real content about. Only those categories' KPIs are matched against it. A page with no ESG content — a cover page, an index, a purely financial table — is not scored at all. A page can belong to more than one category.
 
-| Score | What the page shows |
+**Step 1. Score each KPI found on the page.** The AI scores only the KPIs that page says something about:
+
+| Score | What the page shows about that KPI |
 |---|---|
-| 0 | The KPI is not addressed |
-| 1–30 | Only mentioned, no detail |
-| 31–60 | A policy or commitment is described |
-| 61–80 | Specific actions or programmes are described |
-| 81–100 | Measured data, or targets with progress |
+| **0** | You cannot judge the performance: only named or mentioned; only promised, planned or pending; or too little said to tell whether it is good |
+| **1–20** | Poor: fines, penalties, lawsuits, incidents, accidents, a worsening trend, an admitted failure |
+| **21–40** | Weak: something is being done, but early, partial or thin, with no result |
+| **41–60** | Moderate: real actions or programmes in place, but no measured result |
+| **61–80** | Good: measured results, or real progress against a target |
+| **81–100** | Strong: targets met, a measured improvement, independent assurance or certification |
 
-**Step 2. Keep the best score for each KPI.** If a KPI is found on several pages, its highest score counts. A KPI found nowhere scores 0.
+The judgement is **how good the performance is**, never how much detail is written.
 
-**Step 3. Work out each category score.** Add the best scores of all the category's KPIs and divide by the maximum possible (number of KPIs × 100). The result is a percentage from 0 to 100.
+**Step 2. Keep the best score for each KPI.** If a KPI is found on several pages, its highest score counts — except that **if any page showed poor performance (1–20), the KPI is held down to 20**, however good another page looks. For a lender this is the point: a penalty on page 30 is not cancelled out by a good paragraph on page 4. A KPI found nowhere scores 0.
 
-**Step 4. Page score (for reference only).** A page's score is the average of the KPI scores found on that page. It explains the page but is **not** used in the final score.
+**Step 3. Work out each category score.** The average of **all** that category's KPI scores, with missing KPIs counted as 0 — the total of the scores ÷ (number of KPIs × 100) × 100.
 
-**Step 5. Work out the overall score with the loan-type weights.**
+**Page score (for reference only).** A page's score is the average of the KPI scores found on that page. It explains the page but is **not** used in the final score.
+
+**Step 4. Work out the overall score with the loan-type weights.**
 
 | Loan type | Environment | Social | Governance |
 |---|---|---|---|
@@ -72,7 +87,7 @@ Steps 1 to 4 are the same as the ESG calculator.
 | Export Finance | 25% | 30% | 45% |
 | Venture Debt | 15% | 35% | 50% |
 
-**Step 6. Give the grade and the lending recommendation.** Decimals are dropped before grading (79.9 counts as 79), the same as the ESG calculator.
+**Step 5. Give the grade and the lending recommendation.** Decimals are dropped before grading (79.9 counts as 79), the same as the ESG calculator.
 
 | Overall score | Grade | Recommendation |
 |---|---|---|
@@ -89,39 +104,50 @@ The KPIs are the same as the ESG calculator: our ESG metrics sheet, stored in th
 
 To keep the example short, Environment has 10 KPIs here.
 
-**Step 1. Scores found on the pages**
+**Step 0. Categories of each page**
 
-| Page | KPIs found (score) |
+| Page | Categories |
 |---|---|
-| 1 | KPI 4 (32) |
-| 2 | KPI 8 (32), KPI 9 (80) |
-| 7 | KPI 4 (50), KPI 9 (65) |
+| 1 | Environment |
+| 2 | Environment, Social |
+| 3 | (none — index page, skipped) |
+| 7 | Environment |
+
+**Step 1. Environment KPI scores on those pages**
+
+| Page | KPI | Score | Why |
+|---|---|---|---|
+| 1 | KPI 4 | 0 | the policy is named, nothing shown about performance |
+| 2 | KPI 8 | 45 | a programme is running, no results given |
+| 2 | KPI 9 | 75 | emissions down 12%, measured |
+| 7 | KPI 4 | 55 | the same policy, now with actions described |
+| 7 | KPI 9 | 15 | an environmental penalty was paid |
 
 **Step 2. Best score per KPI**
 
-| KPI | Best score | Why |
+| KPI | Score | Why |
 |---|---|---|
-| KPI 4 | 50 | Page 7 (50) is higher than page 1 (32) |
-| KPI 8 | 32 | Only found on page 2 |
-| KPI 9 | 80 | Page 2 (80) is higher than page 7 (65) |
-| The other 7 KPIs | 0 | Not found anywhere |
+| KPI 4 | 55 | page 7 (55) beats page 1 (0) |
+| KPI 8 | 45 | only found on page 2 |
+| KPI 9 | **20** | page 2 scored 75, but page 7 showed poor performance (15) → capped at 20 |
+| The other 7 KPIs | 0 | not found anywhere |
 
 **Step 3. Environment score**
 
-(50 + 32 + 80) ÷ (10 × 100) × 100 = **16.2**
+(55 + 45 + 20) ÷ (10 × 100) × 100 = **12.0**
 
-Social and Governance are worked out the same way. Say Social = 55 and Governance = 70.
+Social and Governance are worked out the same way. Say Social = 22 and Governance = 30.
 
-**Step 5 and 6. Overall score, grade and recommendation: same report, two loan types**
+**Steps 4 and 5. Overall score, grade and recommendation: same report, two loan types**
 
 | | Working Capital (20 / 30 / 50) | Agriculture Loan (50 / 25 / 25) |
 |---|---|---|
-| Calculation | 0.20 × 16.2 + 0.30 × 55 + 0.50 × 70 | 0.50 × 16.2 + 0.25 × 55 + 0.25 × 70 |
-| Overall | 3.24 + 16.50 + 35.00 = **54.74** | 8.10 + 13.75 + 17.50 = **39.35** |
-| Grade | **C (Average)** | **D (Below Average)** |
-| Recommendation | Caution: enhanced ESG due diligence | High risk: detailed review before lending |
+| Calculation | 0.20 × 12.0 + 0.30 × 22 + 0.50 × 30 | 0.50 × 12.0 + 0.25 × 22 + 0.25 × 30 |
+| Overall | 2.40 + 6.60 + 15.00 = **24.00** | 6.00 + 5.50 + 7.50 = **19.00** |
+| Grade | **D (Below Average)** | **D (Below Average)** |
+| Recommendation | High risk: detailed review before lending | High risk: detailed review before lending |
 
-The weak Environment score (16.2) hurts much more for an Agriculture Loan, where Environment counts for 50%.
+The weak Environment score (12.0) hurts more for an Agriculture Loan, where Environment counts for 50%.
 
 ## Why we score KPIs, not pages
 
@@ -155,7 +181,7 @@ These help the credit team but do **not** change the score.
 ## Questions and answers
 
 **1. Is the BFSI score calculated the same way as the ESG score?**
-Yes, for Environment, Social and Governance. Each KPI is scored 0–100, keeps its best score, and missing KPIs count as 0. The same report gets the same E, S and G scores in both calculators.
+Yes, for Environment, Social and Governance. The page is placed in a category first, each KPI found is scored 0–100 on how good the performance is, a KPI keeps its best score (capped at 20 if any page showed poor performance), and missing KPIs count as 0. The same report gets the same E, S and G scores in both calculators.
 
 **2. What is different from the ESG calculator?**
 Only the weights for the overall score. The ESG calculator always uses 35% E + 30% S + 35% G. The BFSI calculator uses the weights for the loan type.
@@ -167,7 +193,7 @@ Different loans carry different ESG risks. A Renewable Energy or Agriculture loa
 The 2 missing KPIs score 0 and still count. The total is divided by all 10 KPIs.
 
 **5. Which score counts when a KPI is found on several pages?**
-The highest one.
+The highest one — unless any page showed poor performance (1–20) for that KPI, in which case it is held down to 20. Good news does not erase a penalty.
 
 **6. Is the overall score calculated from page scores?**
 No. It comes only from each KPI's best score. Page scores only explain each page.
@@ -186,3 +212,6 @@ Yes. An admin can change a KPI's score in the report editor. The category score,
 
 **11. What happens to BFSI reports that were already scored?**
 They keep their current scores and grades. Only new or re-run analyses use this method.
+
+**12. The borrower only mentions a policy. Does that earn marks?**
+No — 0. A lender cannot judge risk from the fact that a document names something. Marks start once the report shows what the borrower actually does and how well it works.

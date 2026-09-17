@@ -297,6 +297,20 @@ def load_criteria() -> dict:
     return out
 
 
+def classify_units(units: list[dict]) -> dict[int, list[str]]:
+    """Step 0, the same as the ESG calculator (app/esg/scoring.py): {unit index: category
+    names} from one call per unit, all in flight together. A unit whose call or answer
+    failed falls back to every category, so no page is dropped by a failed
+    classification."""
+    prompts = {i: kpi_scoring.classify_prompt(u["text"]) for i, u in enumerate(units)}
+    out = {}
+    answers = get_client().batch(prompts) if prompts else {}
+    for i in range(len(units)):
+        cats = kpi_scoring.parse_categories(answers.get(i))
+        out[i] = list(kpi_scoring.CATEGORIES) if cats is None else cats
+    return out
+
+
 def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -> dict:
     """Score an already-extracted report. Extraction is the caller's job so it can check
     the text-level cache before spending anything on the API.
@@ -311,18 +325,22 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
     if page_rows is not None:
         page_rows.extend({"unit": i, "page_no": u["page_no"], "text": u["text"], "categories": {}}
                          for i, u in enumerate(units))
+    unit_cats = classify_units(units)   # step 0: which categories each unit is about
+    logger.info("bfsi units by category: %s",
+                {c: sum(1 for cats in unit_cats.values() if CAT_NAMES[c] in cats) for c in ADJECTIVES})
     scores, keywords, negative_keywords, reasons = {}, {}, {}, {}
     kpi_coverage = {}
     all_results = []
     for cat, adjective in ADJECTIVES.items():
         prompts = {i: _sprintf(SCORING_PROMPT, adjective, criteria[cat], u["text"])
-                   for i, u in enumerate(units)}
+                   for i, u in enumerate(units) if CAT_NAMES[cat] in unit_cats.get(i, ())}
         # One request per page, all in flight together. A unit whose retries were all
         # exhausted comes back None and is simply left out of the average.
         results = []
         kpis = kpi_lists[CAT_NAMES[cat]]
         unit_kpis = []   # (page_no, {KPI: 0-100}) per unit
-        for i, r in get_client().batch(prompts).items():
+        # No unit is about this category: nothing to send, so every KPI stays "not found".
+        for i, r in (get_client().batch(prompts) if prompts else {}).items():
             if not isinstance(r, dict):
                 continue
             r["page_no"] = units[i]["page_no"]     # page travels with the score
@@ -330,7 +348,7 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
             # The page score is the average of its KPI scores (reference only); it
             # replaces the AI's own number everywhere the page is shown.
             r["page_score"] = kpi_scoring.page_score(scored)
-            unit_kpis.append((r["page_no"], scored))
+            unit_kpis.append((r["page_no"], scored, kpi_scoring.kpi_reasons(r, kpis)))
             results.append(r)
             if page_rows is not None:
                 page_rows[i]["categories"][CAT_NAMES[cat]] = {
@@ -339,6 +357,8 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
                     "positive_keywords": pool([r], "positive_keywords", 1000),
                     "negative_keywords": pool([r], "negative_keywords", 1000),
                     "kpis": kpi_scoring.kpi_labels(scored, kpis),
+                    # Set when the answer's negative keywords disagree with its scores.
+                    "review": kpi_scoring.contradiction(r, scored),
                 }
         # Category score: every KPI's best score as a percentage of the maximum -- never
         # the average of the unit scores.

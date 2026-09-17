@@ -85,14 +85,17 @@ def _themes_lookup(pillar: str) -> dict:
 
 
 def _level_text(score: float) -> str:
+    # The performance bands of app/esg/scoring.py SCORE_GUIDE, named.
     if score >= 81:
-        return "Measured data or targets with progress"
+        return "Strong: targets met, measured improvement or assurance"
     if score >= 61:
-        return "Specific actions or programmes"
-    if score >= 31:
-        return "Policy or commitment described"
+        return "Good: measured results or progress against a target"
+    if score >= 41:
+        return "Moderate: real action, no measured result"
+    if score >= 21:
+        return "Weak: early or partial action, no result"
     if score > 0:
-        return "Mentioned only"
+        return "Poor: penalties, incidents or a worsening trend"
     return "Not found in the report"
 
 
@@ -161,7 +164,7 @@ def build_facts(kind: str, doc: dict) -> dict:
     pillars, kpi_rows, total, found, specific = {}, [], 0, 0, 0
     for code, name in PILLARS:
         rows = [{"key": r["kpi"], "kpi": r["kpi"].strip().rstrip("."), "score": scoring.kpi_best(r),
-                 "pages": r.get("pages") or []}
+                 "pages": r.get("pages") or [], "evidence": r.get("evidence") or {}}
                 for r in (coverage.get(name) or {}).get("kpis") or []]
         lookup = _themes_lookup(code)
         themes = {}
@@ -174,14 +177,22 @@ def build_facts(kind: str, doc: dict) -> dict:
             avg = sum(i["score"] for i in items) / len(items)
             hits = sorted((i for i in items if i["score"] > 0), key=lambda i: -i["score"])
             theme_list.append({
-                "name": theme, "score": round(avg, 2), "label": _grade(avg)[1],
+                "name": theme, "score": round(avg, 2), "label": _grade(avg)[1], "hits": len(hits),
                 "drivers": "; ".join(f"{i['kpi']} ({_fmt(i['score'])})" for i in hits[:3]) or "No KPI evidence found",
                 "note": f"{len(hits)} of {len(items)} KPIs found in the report",
             })
         strong = sorted((r for r in rows if r["score"] > 0), key=lambda r: -r["score"])
         weakest_themes = [t["name"] for t in sorted(theme_list, key=lambda t: t["score"])]
+        # Which missing KPIs the written summary names: the report's own evidence decides.
+        # A theme the report discloses something in comes first -- those gaps are the ones
+        # this company can actually close. A theme with no evidence at all comes last, so
+        # the summary talks about what the report is about instead of listing metrics from
+        # a line of business it is not in. Every missing KPI still scores 0 and still
+        # counts towards the pillar; this is only the order they are talked about in.
+        evidenced = {t["name"] for t in theme_list if t["hits"]}
         gaps = sorted((r for r in rows if r["score"] == 0),
-                      key=lambda r: weakest_themes.index(r["theme"]) if r["theme"] in weakest_themes else 99)
+                      key=lambda r: (0 if r["theme"] in evidenced else 1,
+                                     weakest_themes.index(r["theme"]) if r["theme"] in weakest_themes else 99))
         grade, label = _grade(scores[code])
         detail = coverage.get(name) or {}
         pillars[code] = {
@@ -223,6 +234,11 @@ NARRATIVE_SYSTEM = (
     "commitments. Every strength, weakness and priority must name a KPI or theme from the data. "
     "A missing KPI means the report does not disclose it, not that the company does not do it: "
     "describe gaps as missing or limited disclosure (e.g. 'No disclosure on biodiversity'). "
+    "Build the text from what this report evidenced -- the KPIs found, their scores and their "
+    "themes -- and name missing KPIs only as absent disclosure, in the order given. Priorities "
+    "must stay inside the themes this report already covers; never recommend work in an area "
+    "the report shows no involvement in, and never introduce a KPI, theme or topic that is not "
+    "in the data. "
     "Plain professional English, short sentences. Respond in JSON with exactly these fields: "
     '{"executive_summary": "<3-4 sentences>", "key_rating_drivers": "<1 sentence>", '
     '"disclosure_headline": "<1 sentence on how complete and specific the evidence is>", '
@@ -234,6 +250,19 @@ NARRATIVE_SYSTEM = (
 )
 
 
+def _kpi_evidence(r: dict) -> str:
+    """"Water withdrawn (90) -- p.12: 22% reduction against a 2030 target": the KPI, the
+    score it earned and the reason the scoring call gave for it (app/esg/scoring.py
+    kpi_reasons), so the summary text is written from the evidence, not from the number
+    alone."""
+    text = f"{r['kpi']} ({_fmt(r['score'])})"
+    ev = r.get("evidence") or {}
+    if ev.get("reason"):
+        page = f"p.{ev['page']}" if ev.get("page") is not None else "the report"
+        return f"{text} -- {page}: {str(ev['reason'])[:200]}"
+    return text
+
+
 def _narrative_input(f: dict) -> dict:
     return {
         "calculator": "BFSI borrower assessment" if f["kind"] == "bfsi" else "ESG rating",
@@ -242,7 +271,7 @@ def _narrative_input(f: dict) -> dict:
         "pillars": {c: {"name": p["name"], "score": round(p["score"], 2), "grade": p["grade"],
                         **({"set_by_analyst": True, "kpi_total": round(p["kpi_total"], 2)} if p["manual"] else {}),
                         "themes": [{"name": t["name"], "score": t["score"], "found": t["note"]} for t in p["themes"]],
-                        "strongest_kpis": [f"{r['kpi']} ({_fmt(r['score'])})" for r in p["strong"]],
+                        "strongest_kpis": [_kpi_evidence(r) for r in p["strong"]],
                         "kpis_not_disclosed": [f"{r['kpi']} ({r['theme']})" if r["theme"] else r["kpi"]
                                                for r in p["gaps"]]}
                     for c, p in f["pillars"].items()},
@@ -393,9 +422,12 @@ def render(facts: dict, text: dict) -> bytes:
     _set_paragraph(paras[id(para_el("Applicable KPIs are selected"))],
                    "The strongest scores and the largest gaps in each pillar")
     _set_paragraph(how_to_read.rows[0].cells[0].paragraphs[1],
-                   "Each KPI is scored 0–100 on what the report shows: 1–30 mentioned only, 31–60 a policy or "
-                   "commitment, 61–80 specific actions or programmes, 81–100 measured data or targets with "
-                   "progress. A KPI keeps its best score from any page; KPIs not found in the report score 0.")
+                   "Each page is placed in a pillar first, then each KPI it addresses is scored 0–100 on how "
+                   "good the performance is: 0 when it is only mentioned, promised or too vague to judge, "
+                   "1–20 poor (penalties, incidents, a worsening trend), 21–40 weak, 41–60 real action without "
+                   "results, 61–80 measured results, 81–100 targets met or independently assured. A KPI keeps "
+                   "its best score from any page, held down to 20 if any page showed poor performance; KPIs "
+                   "not found in the report score 0.")
     _set_paragraph(paras[id(para_el("Evidence quality is reported"))],
                    "How much of the KPI library the report covers, and how specific its evidence is")
     _set_paragraph(method_box.rows[0].cells[0].paragraphs[1],

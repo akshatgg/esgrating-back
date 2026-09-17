@@ -501,7 +501,7 @@ def test_admin_export_page_scores_csv(admin_client, db, fake_bfsi, monkeypatch):
     resp = admin_client.get(url)
     assert resp.status_code == 200
     lines = resp.text.splitlines()
-    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords"
+    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords,Review"
     blank = lines.index("")
     rows = list(csv.reader(lines[1:blank]))
     assert rows and [r[1] for r in rows] == sorted(

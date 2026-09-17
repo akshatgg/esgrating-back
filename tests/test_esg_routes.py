@@ -393,11 +393,11 @@ def test_legacy_export_csv_header(admin_client, db):
     resp = admin_client.get(f"/api/admin/esg/export_csv/{company_id}")
     assert resp.status_code == 200
     lines = resp.text.splitlines()
-    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords"
+    assert lines[0] == "Filename,Category,Text,Page No,Reason,Score,KPIs Present,Positive Keywords,Negative Keywords,Review"
     # A page scored before KPI tagging existed exports an empty KPI cell.
-    assert lines[1] == "report.pdf,Environment,some page text,1,good disclosure,80,,\"renewables, recycling\",emissions"
+    assert lines[1] == "report.pdf,Environment,some page text,1,good disclosure,80,,\"renewables, recycling\",emissions,"
     assert lines[2] == ("report.pdf,Social,hr page,2,policies,60,"
-                        "\"Diversity, equity, and inclusion efforts.; Employee welfare and safety.\",posh,")
+                        "\"Diversity, equity, and inclusion efforts.; Employee welfare and safety.\",posh,,")
     assert len(lines) == 3
 
 
@@ -633,7 +633,7 @@ def test_export_csv_adds_page_scores_and_kpi_summary(admin_client, db):
         final,
     ]})
     lines = admin_client.get(f"/api/admin/esg/export_csv/{cid}").text.splitlines()
-    assert lines[1] == "r.pdf,Environment,t,2,r,56.0,E2 (80); E1 (32),,"
+    assert lines[1] == "r.pdf,Environment,t,2,r,56.0,E2 (80); E1 (32),,,"
     assert lines[3:] == [
         "Category,KPI,Best Score,Found on Pages",
         "Environment,E1,32,2",

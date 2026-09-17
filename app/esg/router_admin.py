@@ -335,6 +335,7 @@ def legacy_export_csv(company_id: str, submission_id: str | None = None,
                     kpis_cell(analysis_data.get("kpis")),
                     ", ".join(analysis_reason.get("positive_keywords", [])),
                     ", ".join(analysis_reason.get("negative_keywords", [])),
+                    analysis_data.get("review", ""),
                 ])
             except Exception:
                 continue

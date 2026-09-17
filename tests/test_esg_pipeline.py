@@ -89,7 +89,8 @@ def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monk
     # scoring guide -- plus the three keyword-ranking calls. No separate KPI call.
     scoring_calls = [c for c in fake.calls if "score this" in c]
     assert len(scoring_calls) == 6 and all('"kpi_scores"' in c and "81-100:" in c for c in scoring_calls)
-    assert len(fake.calls) == 6 + 3
+    # 2 classification calls (one per page, step 0) + 6 scoring + 3 keyword-ranking.
+    assert len(fake.calls) == 2 + 6 + 3
     # Category = best KPI scores as a % of the maximum: (32 + 80) / 200 -> 56, whatever the
     # AI's own page score (90 / 60 / 50) was.
     assert final["environmental_score"] == 56 and final["social_score"] == 56 and final["governance_score"] == 56
@@ -106,6 +107,33 @@ def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monk
     assert len(pages) == 6
     assert all(r["kpis"] == [f"{r['category']} B (80)", f"{r['category']} A (32)"] for r in pages)
     assert all(r["page_score"] == 56 for r in pages)
+
+
+def test_only_the_categories_a_page_is_about_are_scored(db, monkeypatch):
+    """Step 0: the page is placed in a category first, and only that category's KPIs are
+    matched against it -- no Social or Governance call for a page about the environment."""
+    _kpi_prompts(db)
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50}, categories=["Environment"])
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
+    scoring_calls = [c for c in fake.calls if "score this" in c]
+    assert len(scoring_calls) == 2 and all("[Environment]" in c for c in scoring_calls)
+    assert final["environmental_score"] == 56
+    assert final["social_score"] == 0 and final["governance_score"] == 0
+    # Social and Governance were never asked, so their KPIs are all "not found" = 0.
+    assert [k["score"] for k in final["kpi_coverage"]["Social"]["kpis"]] == [0.0, 0.0]
+
+
+def test_a_document_with_no_esg_content_is_not_scored(db, monkeypatch):
+    _kpi_prompts(db)
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50}, categories=[])
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["cover page"]))], cid, "2024-2025")
+    assert out["status"] == "error" and "no page of this document" in out["message"]
+    assert [c for c in fake.calls if "score this" in c] == []
+    assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 
 
 def test_missing_kpis_count_as_zero(db, monkeypatch):
@@ -250,8 +278,9 @@ def test_all_scoring_failed_is_not_stored_or_cached(db, prompts, monkeypatch):
     out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["t"]))], cid, "2024-2025")
     assert out == {
         "status": "error",
-        "message": "No valid ESG score could be computed — the AI scoring failed for "
-                   "every page (check the OpenAI key/quota).",
+        "message": "No valid ESG score could be computed — no page of this document "
+                   "was scored. Either it has no Environment, Social or Governance "
+                   "content, or the AI scoring failed (check the OpenAI key/quota).",
     }
     assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 
@@ -272,8 +301,9 @@ def test_partial_failure_with_empty_sector_is_not_stored_or_cached(db, prompts, 
     out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["t"]))], cid, "2024-2025")
     assert out == {
         "status": "error",
-        "message": "No valid ESG score could be computed — the AI scoring failed for "
-                   "every page (check the OpenAI key/quota).",
+        "message": "No valid ESG score could be computed — no page of this document "
+                   "was scored. Either it has no Environment, Social or Governance "
+                   "content, or the AI scoring failed (check the OpenAI key/quota).",
     }
     assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 

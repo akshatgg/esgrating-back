@@ -2,11 +2,20 @@
 
 ## Summary
 
-The ESG score measures how well a company's report proves a fixed list of KPIs.
-Each KPI is scored from 0 to 100, and a KPI that is missing scores 0.
-The final score is **35% Environment + 30% Social + 35% Governance**.
+The ESG score measures **how good a company's performance is** on a fixed list of KPIs,
+read from the report it uploads.
 
-This method is for the ESG calculator only. The BFSI calculator does not change.
+- Every page is first placed in a category: Environment, Social, Governance, or more than one.
+- Only that category's KPIs are then matched against the page.
+- Each KPI found is scored from 0 to 100 on **how good the performance is** — not on how much
+  detail the report gives.
+- A KPI that is only mentioned, only promised, or too vague to judge scores **0**.
+- A KPI that is not found anywhere scores **0** and still counts.
+- Each category score is the **average of all its KPI scores**.
+- The final score is **35% Environment + 30% Social + 35% Governance**.
+
+The BFSI calculator uses the same method with its own weights — see
+`BFSI_SCORING_METHODOLOGY.md`.
 
 ## How the score is calculated
 
@@ -14,38 +23,86 @@ This method is for the ESG calculator only. The BFSI calculator does not change.
 Each page of the report
         │
         ▼
-AI scores each KPI found on that page (0–100)
+Step 0: which category is this page? (E, S, G, or several; none = page skipped)
         │
         ▼
-Each KPI keeps its best score from any page (not found = 0)
+Step 1: for those categories only, score each KPI the page shows (0–100, how good)
         │
         ▼
-Category score = total of best scores ÷ (number of KPIs × 100) × 100
+Step 2: each KPI keeps its best score (not found = 0; poor performance caps it at 20)
         │
         ▼
-Overall score = 35% Environment + 30% Social + 35% Governance
+Step 3: category score = average of all that category's KPI scores
         │
         ▼
-Grade
+Step 4: overall = 35% Environment + 30% Social + 35% Governance
+        │
+        ▼
+Step 5: grade
 ```
 
-**Step 1. Score each KPI on every page.** The AI reads each page and scores every KPI it finds, using this guide:
+### Step 0. Place the page in a category
 
-| Score | What the page shows |
+One AI call per page asks which categories the page has real content about.
+
+| Answer | What happens |
 |---|---|
-| 0 | The KPI is not addressed |
-| 1–30 | Only mentioned, no detail |
-| 31–60 | A policy or commitment is described |
-| 61–80 | Specific actions or programmes are described |
-| 81–100 | Measured data, or targets with progress |
+| Environment | only the 125 Environment KPIs are matched against that page |
+| Environment + Social | both sets are matched; Governance is not asked about that page |
+| (none) | the page is not scored at all — a cover page, an index, a photo caption, a purely financial table |
 
-**Step 2. Keep the best score for each KPI.** If a KPI is found on several pages, its highest score counts. A KPI found nowhere scores 0.
+A page can belong to more than one category. If the call fails, the page is scored for all
+three categories, so no page is ever lost because a classification failed.
 
-**Step 3. Work out each category score.** Add the best scores of all the category's KPIs and divide by the maximum possible (number of KPIs × 100). The result is a percentage from 0 to 100.
+### Step 1. Score each KPI found on the page
 
-**Step 4. Work out the overall score.** Overall = 35% Environment + 30% Social + 35% Governance.
+The AI reads the page and scores only the KPIs that page says something about:
 
-**Step 5. Give the grade.**
+| Score | What the page shows about that KPI |
+|---|---|
+| **0** | You cannot judge the performance: only named, listed or mentioned; only promised, planned or pending; or too little said to tell whether it is good |
+| **1–20** | Poor: fines, penalties, lawsuits, incidents, accidents, a worsening trend, an admitted failure |
+| **21–40** | Weak: something is being done, but early, partial or thin, with no result |
+| **41–60** | Moderate: real actions or programmes in place, but no measured result |
+| **61–80** | Good: measured results, or real progress against a target |
+| **81–100** | Strong: targets met, a measured improvement, independent assurance or certification |
+
+The judgement is **how good the performance is**, never how much detail is written. A page
+with a long paragraph that says nothing about performance scores 0 for that KPI.
+
+### Step 2. Each KPI keeps its best score
+
+If a KPI appears on several pages, its **highest** score counts — with one exception:
+
+> **If any page showed poor performance (1–20) for that KPI, the KPI is held down to 20**,
+> however good another page looks.
+
+So a fine on page 30 cannot be cancelled out by a nice paragraph on page 4. A KPI found
+nowhere scores 0. The report and the CSV mark a held-down KPI as *capped at 20 (poor
+performance found)*.
+
+### Step 3. Category score
+
+The average of **all** that category's KPI scores, with missing KPIs counted as 0:
+
+```
+Category score = total of the KPI scores ÷ (number of KPIs × 100) × 100
+```
+
+Which is the same thing as the average, on a 0–100 scale. Example: Environment has 125
+KPIs. If three are scored 80, 70 and 60 and the other 122 are not found:
+
+(80 + 70 + 60) ÷ (125 × 100) × 100 = 210 ÷ 12500 × 100 = **1.68**
+
+That number is low on purpose. It says the report evidenced good performance on 3 of 125
+Environment metrics. The report also prints how many KPIs were found, so the score and the
+coverage are both visible.
+
+### Step 4. Overall score
+
+Overall = 35% Environment + 30% Social + 35% Governance.
+
+### Step 5. Grade
 
 | Overall score | Grade |
 |---|---|
@@ -56,9 +113,12 @@ Grade
 | 40–60 | C Average |
 | Below 40 | D Below Average |
 
+The score is truncated before grading, so 79.9 is read as 79.
+
 ## Where the KPIs come from
 
-The KPIs come from our ESG metrics sheet, stored in the database (`esg_kpis`). Each metric sits in a group:
+The KPIs come from our ESG metrics sheet, stored in the database (`esg_kpis`). Each metric
+sits in a group:
 
 **Pillar → Sub Pillar → Sub Pillar 1 → Metric**, for example **E → Water → Water II → Water withdrawn**.
 
@@ -68,126 +128,127 @@ The KPIs come from our ESG metrics sheet, stored in the database (`esg_kpis`). E
 | Social | 129 | Community Relations, Diversity, Compensation, Employment Quality, Human Rights, Labour Rights, OHS, Product Access, Product Quality & Safety, Training & Development |
 | Governance | 82 | Business Ethics, Compensation, Diversity, Governance, Transparency |
 
-- The AI gets each metric **with its Sub Pillar and Sub Pillar 1**, so it understands what a short name like "Company loans" or "Auditor Opinion" is about.
-- 5 "Meta" rows (Number of Employees, Current auditor, Reporting boundary, CSO and Investor Relations contact details) are company facts, not scored.
-- The calculation below stays the same; only the list of KPIs is bigger.
+- The AI gets each metric **with its Sub Pillar and Sub Pillar 1**, so it understands what a
+  short name like "Company loans" or "Auditor Opinion" is about.
+- 5 "Meta" rows (Number of Employees, Current auditor, Reporting boundary, CSO and Investor
+  Relations contact details) are company facts, not scored.
 
-## Example
+## Worked example
 
-To keep the example short, Environment has 10 KPIs here.
+To keep it short, Environment has 10 KPIs here.
 
-**Step 1. Scores found on the pages**
+**Step 0. Categories of each page**
 
-| Page | KPIs found (score) |
+| Page | Categories |
 |---|---|
-| 1 | KPI 4 (32) |
-| 2 | KPI 8 (32), KPI 9 (80) |
-| 7 | KPI 4 (50), KPI 9 (65) |
+| 1 | Environment |
+| 2 | Environment, Social |
+| 3 | (none — index page, skipped) |
+| 7 | Environment |
+
+**Step 1. Environment KPI scores on those pages**
+
+| Page | KPI | Score | Why |
+|---|---|---|---|
+| 1 | KPI 4 | 0 | the policy is named, nothing shown about performance |
+| 2 | KPI 8 | 45 | a programme is running, no results given |
+| 2 | KPI 9 | 75 | emissions down 12%, measured |
+| 7 | KPI 4 | 55 | the same policy, now with actions described |
+| 7 | KPI 9 | 15 | an environmental fine was paid |
 
 **Step 2. Best score per KPI**
 
-| KPI | Best score | Why |
+| KPI | Score | Why |
 |---|---|---|
-| KPI 4 | 50 | Page 7 (50) is higher than page 1 (32) |
-| KPI 8 | 32 | Only found on page 2 |
-| KPI 9 | 80 | Page 2 (80) is higher than page 7 (65) |
-| The other 7 KPIs | 0 | Not found anywhere |
+| KPI 4 | 55 | page 7 (55) beats page 1 (0) |
+| KPI 8 | 45 | only found on page 2 |
+| KPI 9 | **20** | page 2 scored 75, but page 7 showed poor performance (15) → capped at 20 |
+| The other 7 KPIs | 0 | not found anywhere |
 
 **Step 3. Environment score**
 
-(50 + 32 + 80) ÷ (10 × 100) × 100 = 162 ÷ 1000 × 100 = **16.2**
+(55 + 45 + 20) ÷ (10 × 100) × 100 = 120 ÷ 1000 × 100 = **12.0**
 
 **Step 4. Overall score**
 
-Social and Governance are worked out the same way. Say Social = 55 and Governance = 70.
+Say Social = 22 and Governance = 30.
 
-Overall = 0.35 × 16.2 + 0.30 × 55 + 0.35 × 70 = 5.67 + 16.50 + 24.50 = **46.67**
+Overall = 0.35 × 12.0 + 0.30 × 22 + 0.35 × 30 = 4.20 + 6.60 + 10.50 = **21.30**
 
-**Step 5. Grade**
-
-46.67 is between 40 and 60, so the grade is **C (Average)**.
-
-## Why we score KPIs, not pages
-
-We looked at two options and chose **Option A**.
-
-- **Option A (chosen):** each KPI keeps its best score, and the category score is built from all the KPIs.
-- **Option B (not chosen):** the category score is the average of the page scores.
-
-With the example above, Option A gives Environment **16.2**. Option B gives (32 + 56 + 57.5) ÷ 3 = **48.5**.
-
-| Situation | Option A | Option B |
-|---|---|---|
-| Report covers only 3 of 10 KPIs | Low score, because 7 missing KPIs count as 0 | High score, because missing KPIs are ignored |
-| Company repeats the same policy on 10 pages | No change, because the best score counts once | Score goes up |
-| Report adds 50 pages of general content | No change | Score changes |
-| Client asks "why this score?" | We show each KPI, its score and its page | We can only say "average of the pages" |
-
-Why Option A is better:
-
-- **It follows professional practice.** ESG ratings and India's BRSR framework check a fixed set of indicators. The length of the report doesn't count.
-- **It is fair.** A longer report or repeated text cannot raise the score.
-- **It shows the gaps.** Missing KPIs are listed, so the company knows what to disclose next.
-- **It can be checked.** Every number traces back to a KPI and a page.
+**Step 5. Grade** — 21.30 is below 40, so the grade is **D (Below Average)**.
 
 ## What the CSV export shows
 
-**Part 1. One row per page and category**
+**Part 1. One row per page and category** — only the categories that page belongs to:
 
 | Page | Category | Reason | KPIs found (score) | Page score |
 |---|---|---|---|---|
-| 1 | Environment | … | KPI 4 (32) | 32 |
-| 2 | Environment | … | KPI 8 (32); KPI 9 (80) | 56 |
-| 7 | Environment | … | KPI 4 (50); KPI 9 (65) | 57.5 |
+| 1 | Environment | … | KPI 4 (0) | 0 |
+| 2 | Environment | … | KPI 9 (75); KPI 8 (45) | 60 |
+| 2 | Social | … | KPI 3 (40) | 40 |
+| 7 | Environment | … | KPI 4 (55); KPI 9 (15) | 35 |
 
-The page score is the average of the KPI scores on that page, for example (32 + 80) ÷ 2 = 56.
-It only explains that page. It is **not** used in the final score.
+The page score is the average of the KPI scores on that page. It explains that page only
+and is **not** used in the final score.
 
 **Part 2. Summary at the end of the file**
 
-| Category | KPI | Best score | Found on pages |
+| Category | KPI | Best Score | Found on Pages |
 |---|---|---|---|
-| Environment | KPI 4 | 50 | 1, 7 |
-| Environment | KPI 8 | 32 | 2 |
-| Environment | KPI 9 | 80 | 2, 7 |
+| Environment | KPI 4 | 55 | 1, 7 |
+| Environment | KPI 8 | 45 | 2 |
+| Environment | KPI 9 | 20 | 2, 7 (capped at 20: poor performance found) |
 | Environment | KPI 1 | 0 | – |
-| Environment total | | 16.2 | |
-| Overall | | 46.67 (Grade C) | |
+| Environment total | | 12.0 | |
+| Overall | 35% Environment + 30% Social + 35% Governance | 21.30 | Grade D |
 
 ## Questions and answers
 
-**1. On what basis is the ESG score calculated?**
-Only on the KPIs. Each KPI is scored from 0 to 100 based on what the report proves about it.
+**1. On what basis is a KPI scored?**
+On how good the company's performance is, judged from the page's own content. Not on how
+much detail the report gives.
 
-**2. If there are 10 KPIs and only 8 are found in the report, what happens?**
-The 2 missing KPIs score 0 and still count. The total is divided by all 10 KPIs, not by 8. For example, if the 8 found KPIs add up to 560: 560 ÷ 1000 × 100 = **56**.
+**2. The report mentions a KPI but says nothing about performance. What score?**
+**0.** The same for a promise, a plan, or anything pending — if the performance cannot be
+judged, the score is 0.
 
-**3. Can a KPI get any score, like 20, 25 or 32?**
-Yes. Each KPI gets a score from 0 to 100 using the scoring guide above. (Before this change, a KPI could only get 100, 50 or 0.)
+**3. What if the performance is bad?**
+1–20, depending on how bad. Bad performance scores something, so the report can tell "we
+paid fines" apart from "we said nothing" — and it caps that KPI at 20 everywhere.
 
-**4. The same KPI is found on different pages with different scores. Which one counts?**
-The highest one. If KPI 9 scores 80 on page 2 and 65 on page 7, KPI 9 = **80**.
+**4. Why are the same KPI's pages sometimes capped?**
+Because good news does not erase bad news. If any page shows poor performance for a KPI,
+that KPI cannot score above 20 no matter what another page says.
 
-**5. How is the score for each page given (for example 43 or 23)?**
-The page score is the average of the KPI scores found on that page. Page 2 has KPI 8 (32) and KPI 9 (80), so the page score is **56**. If a page has no KPIs, its score is 0.
+**5. If a category has 125 KPIs and only 3 are found, what happens?**
+The other 122 score 0 and still count. The category score is the average of all 125, so it
+will be low. That is the honest answer: the report did not evidence those metrics.
 
-**6. Is the overall score calculated from the page scores?**
-No. The overall score comes only from each KPI's best score. Page scores are shown in the CSV to explain each page, but they don't affect the rating.
+**6. Why did the scores drop compared with the old reports?**
+The old reports were scored a different way: every KPI the document touched anywhere
+counted as fully proved (100) or half proved (50), and the list held only 18 KPIs per
+category. That rewarded long reports and could never be lowered by bad news. Old reports
+keep their old scores; only new or re-run analyses use this method.
 
-**7. Which option is better and more professional: KPI scores (A) or page scores (B)?**
-Option A. See "Why we score KPIs, not pages" above.
+**7. Which pages are scored for which category?**
+Step 0 decides. A page about water and workers is scored for Environment and Social; a page
+with no ESG content is not scored at all.
 
-**8. How are Environment, Social and Governance combined?**
-Overall = **35% Environment + 30% Social + 35% Governance**. This applies to the ESG calculator only, not BFSI.
+**8. Is the overall score calculated from the page scores?**
+No. Only from the KPI scores. Page scores are shown to explain each page.
 
-**9. How much is one KPI worth?**
-All KPIs in a category count equally. One Environment metric moved from 0 to 100 adds 100 ÷ 125 = 0.8 to the Environment score, and 0.8 × 35% = 0.28 to the overall score.
+**9. How are Environment, Social and Governance combined?**
+Overall = **35% Environment + 30% Social + 35% Governance**. BFSI uses the loan type's
+weights instead.
 
-**10. What does the CSV show?**
-Each page with its KPIs and their scores, then each KPI's best score, the category totals and the overall score.
+**10. How much is one KPI worth?**
+All KPIs in a category count equally. One Environment metric moved from 0 to 100 adds
+100 ÷ 125 = 0.8 to the Environment score, and 0.8 × 35% = 0.28 to the overall score.
 
 **11. Can the scores be corrected by hand?**
-Yes. An admin can change a KPI's score in the report editor. The category score, overall score and grade update automatically, and "Reset" goes back to the AI's scores.
+Yes. An admin can change a KPI's score in the report editor. The category score, overall
+score and grade update automatically, an edited KPI is no longer capped, and "Reset" goes
+back to the AI's scores.
 
 **12. What happens to reports that were already scored?**
 They keep their current scores. Only new or re-run analyses use this method.

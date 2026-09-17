@@ -43,14 +43,21 @@ def admin_client(client, db):
 
 
 class FakeLLM:
-    """Scores by category keyword in the prompt; keyword selection returns first 5."""
-    def __init__(self, scores):
+    """Scores by category keyword in the prompt; keyword selection returns first 5.
+
+    Step 0 (classification) answers with `categories` -- every category unless a test
+    passes its own list, so a page is scored for exactly those categories.
+    """
+    def __init__(self, scores, categories=("Environment", "Social", "Governance")):
         self.scores, self.calls = scores, []
+        self.categories = list(categories)
 
     def generate_score(self, text):
         self.calls.append(text)
         if "STRICTLY SELECT THE TOP 5 KEYWORDS" in text:
             return json.dumps({"keywords": ["k1", "k2", "k3", "k4", "k5"]})
+        if '"categories"' in text:
+            return json.dumps({"categories": self.categories})
         for cat, score in self.scores.items():
             if f"[{cat}]" in text:
                 return json.dumps({"reason": "r", "score": score, "positive_keywords": ["k1", "k2"],
