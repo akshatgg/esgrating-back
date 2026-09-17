@@ -1,0 +1,179 @@
+# The ESG Rating Summary (.docx) for ESG and BFSI reports (app/reports/summary.py).
+import io
+import re
+from datetime import datetime, timezone
+
+import docx
+import pytest
+from bson import ObjectId
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
+from app.core.config import settings
+from app.esg import scoring
+from app.reports import summary
+
+KPIS = {  # pillar -> [(sub pillar, sub pillar 1, metric)]
+    "E": [("Water", "Water I", "Water related targets"), ("Water", "Water II", "Water withdrawn"),
+          ("Waste", "Waste I", "Waste management policy")],
+    "S": [("OHS", "Occupational Health and Safety I", "Injury rate"),
+          ("Diversity", "Diversity II", "Female employees")],
+    "G": [("Business Ethics", "Business Ethics I", "Anti-bribery/corruption policy"),
+          ("Transparency", "Transparency I", "Sustainability reporting")],
+}
+SCORES = {"Water related targets": 40, "Water withdrawn": 90, "Injury rate": 70, "Anti-bribery/corruption policy": 85}
+
+TEXT = {
+    "executive_summary": "Acme shows strong water data but thin waste disclosure.",
+    "key_rating_drivers": "Water withdrawn and anti-bribery policy", "disclosure_headline": "Evidence is partial",
+    "pillar_narratives": {"E": "E story", "S": "S story", "G": "G story"},
+    "strengths": ["Water withdrawn (90)", "Anti-bribery/corruption policy (85)"],
+    "weaknesses": ["Waste management policy not found", "Female employees not found", "Sustainability reporting not found"],
+    "priorities": [{"area": "Environment - Waste", "gap": "No waste policy", "why": "Waste is 0",
+                    "action": "Publish the waste policy"}],
+    "rating_rationale": "Scores follow KPI coverage.", "rating_interpretation": "Grade C means average.",
+}
+
+
+def _seed_kpis(db):
+    for pillar, rows in KPIS.items():
+        for order, (sp, sp1, metric) in enumerate(rows, 1):
+            db.esg_kpis.insert_one({"pillar": pillar, "sub_pillar": sp, "sub_pillar_1": sp1, "metric": metric,
+                                    "order": order, "is_meta": False})
+
+
+def _coverage():
+    coverage, scores = {}, {}
+    for code, name in summary.PILLARS:
+        names = [m for _, _, m in KPIS[code]]
+        detail = scoring.category_detail([(3, {k: SCORES[k] for k in names if k in SCORES})], names)
+        coverage[name], scores[code] = detail, detail["score"]
+    return coverage, scores
+
+
+def _text_of(data: bytes) -> str:
+    d = docx.Document(io.BytesIO(data))
+    out = []
+    for el in d.element.body.iterchildren():
+        if el.tag.endswith("}p"):
+            out.append(Paragraph(el, d).text)
+        elif el.tag.endswith("}tbl"):
+            out.extend(" | ".join(c.text for c in row.cells) for row in Table(el, d).rows)
+    return "\n".join(out)
+
+
+@pytest.fixture
+def fake_ai(monkeypatch):
+    calls = []
+
+    def ask(kind, system, user):
+        calls.append((kind, user))
+        return dict(TEXT)
+
+    monkeypatch.setattr(summary, "_ask_ai", ask)
+    return calls
+
+
+def _esg(db, **extra):
+    _seed_kpis(db)
+    coverage, s = _coverage()
+    final = {"scoring_method": "kpi_score", "kpi_coverage": coverage, "sector": "Manufacturing",
+             "environmental_score": s["E"], "social_score": s["S"], "governance_score": s["G"],
+             "composite_score": scoring.composite_score(s["E"], s["S"], s["G"])}
+    scoring.grade_all(final)
+    return db.esg_submissions.insert_one({
+        "company_name": "Acme Ltd", "email": "asha@example.com", "name": "Asha", "report_year": "2025-2026",
+        "analyzed_at": datetime(2026, 9, 17, tzinfo=timezone.utc), "final": final, **extra}).inserted_id
+
+
+def test_esg_summary_download(admin_client, db, fake_ai):
+    sid = _esg(db)
+    resp = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == summary.DOCX_MIME
+    assert re.search(r'filename="esg-rating-summary-acme-ltd-[0-9a-f]{6}\.docx"', resp.headers["content-disposition"])
+    text = _text_of(resp.content)
+
+    assert "{{" not in text
+    for gone in ("Forward-Looking", "Controversy", "Appendix", "Consistency", "Verification", "Timeliness",
+                 "Weight / Importance", "SLFRS", "CSE / Identifier", "Automation rule"):
+        assert gone not in text, gone
+    assert "CFC FINLEASE PRIVATE LIMITED" in text and "CIN / GSTIN | Not provided" in text
+    assert "5. Rating Interpretation & Methodology Notes" in text
+    # Scores exactly as stored: E = (40 + 90 + 0) / 300 -> 43.33
+    assert "ENVIRONMENT\n43.33\nC · Average" in text
+    # Theme = average of its KPIs: Water (40 + 90) / 2 = 65; Waste 0
+    assert "Water | 65 | Good | Water withdrawn (90); Water related targets (40) | 2 of 2 KPIs found in the report" in text
+    assert "Waste | 0 | Below Average | No KPI evidence found | 0 of 1 KPIs found in the report" in text
+    # KPI table: 7 columns, strongest and gaps with their theme and pages
+    assert "Environment | Water | Water withdrawn | 90 | Found on p. 3 | Strong | Measured data or targets with progress" in text
+    assert "Environment | Waste | Waste management policy | 0 | Not found in the report | Not found | Not found in the report" in text
+    # Completeness: 4 of 7 KPIs found; specificity: 2 of 4 scored 81-100
+    assert "Completeness | Share of the KPI library the report addresses | Moderate (57%) | 4 of 7 KPIs found in the report" in text
+    assert "Specificity" in text and "2 of 4 KPIs found are scored 81–100" in text
+    # AI prose is placed; missing list items are dropped, not left blank
+    assert TEXT["executive_summary"] in text and "1. Water withdrawn (90)" in text and "3. " not in text.split("What is supporting")[1].split("|")[0]
+    assert "1 | Environment - Waste | No waste policy | Waste is 0 | Publish the waste policy" in text
+    assert "35% Environment + 30% Social + 35% Governance" in text
+
+    # The AI text is cached until the scores change.
+    admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert len(fake_ai) == 1
+    db.esg_submissions.update_one({"_id": sid}, {"$set": {"final.environmental_score": 50}})
+    admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert len(fake_ai) == 2
+
+
+def test_bfsi_summary_uses_cin_loan_type_and_weights(admin_client, db, fake_ai):
+    _seed_kpis(db)
+    coverage, s = _coverage()
+    sid = db.bfsi_submissions.insert_one({
+        "borrower_name": "Borrow Co", "cin_gstin": "U12345MH2015PLC123456", "industry": "manufacturing",
+        "sub_sector": "Textiles", "loan_type": "Agriculture Loan", "created_at": datetime(2026, 5, 2, tzinfo=timezone.utc),
+        "e_score": s["E"], "s_score": s["S"], "g_score": s["G"],
+        "ai_analysis": {"kpi_coverage": coverage, "scoring_method": "kpi_score", "reasons": {"E": [], "S": [], "G": []},
+                        "top_risks": ["Water stress"]},
+    }).inserted_id
+    resp = admin_client.get(f"/api/admin/bfsi/submissions/{sid}/summary")
+    assert resp.status_code == 200
+    text = _text_of(resp.content)
+    assert "{{" not in text
+    assert "CIN / GSTIN | U12345MH2015PLC123456" in text
+    assert "Reporting period | FY 2026-27" in text and "Manufacturing · Textiles" in text
+    assert "BFSI borrower assessment (Agriculture Loan loan)" in text
+    assert "Agriculture: 50% Environment + 25% Social + 25% Governance" in text
+    assert fake_ai[0][0] == "bfsi" and "Water stress" in fake_ai[0][1]
+
+
+def test_summary_needs_kpi_scores(admin_client, db, fake_ai):
+    sid = db.esg_submissions.insert_one({"company_name": "Old", "final": {"composite_score": 50}}).inserted_id
+    resp = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert resp.status_code == 409 and "KPI-scored" in resp.json()["detail"]
+    assert fake_ai == []
+
+
+def test_summary_ai_failure_is_502(admin_client, db, monkeypatch):
+    sid = _esg(db)
+
+    def boom(kind, system, user):
+        raise RuntimeError("quota")
+
+    monkeypatch.setattr(summary, "_ask_ai", boom)
+    resp = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert resp.status_code == 502
+
+
+def test_send_attaches_the_summary(admin_client, db, fake_ai, monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.com")
+    monkeypatch.setattr(settings, "smtp_user", "user@example.com")
+    monkeypatch.setattr(settings, "smtp_password", "pw")
+    sid = _esg(db, company_id=ObjectId())
+    sent = []
+    monkeypatch.setattr("app.esg.router_admin.send_mail",
+                        lambda to, subject, body, **kw: sent.append(kw["attachments"]))
+    resp = admin_client.post(f"/api/admin/esg/submissions/{sid}/send",
+                             files=[("pdfs", ("a.pdf", b"%PDF-1.4 one", "application/pdf"))])
+    assert resp.status_code == 200
+    names = [a.filename for a in sent[0]]
+    assert names[0] == "esg_report.pdf" and re.fullmatch(r"esg-rating-summary-acme-ltd-[0-9a-f]{6}\.docx", names[1])
+    assert sent[0][1].mime == summary.DOCX_MIME
