@@ -48,6 +48,77 @@ def test_full_run_scores_composite_and_persists(db, prompts, monkeypatch):
     assert db.esg_hashes.count_documents({"company_id": cid}) == 1
 
 
+def test_prompt_kpis_reads_only_the_numbered_list():
+    prompt = (
+        "Analyze the following text for social performance. Evaluate the text based on:\n"
+        "1. Diversity, equity, and inclusion efforts.\n"
+        "2. Employee welfare and safety.\n\n"
+        "Provide the response in JSON format with the following fields:\n"
+        '- "score": A number between 0 and 100.\n\n'
+        "Text:\n{text}"
+    )
+    assert pipeline.prompt_kpis(prompt) == ["Diversity, equity, and inclusion efforts.", "Employee welfare and safety."]
+
+
+class KpiFakeLLM(FakeLLM):
+    """Scoring answers that also name the KPIs the page proves: point 2 strongly, point 1
+    partly, and an out-of-range 9 that must be dropped."""
+
+    def generate_score(self, text):
+        out = super().generate_score(text)
+        if '"kpis_strong"' in text:
+            answer = json.loads(out)
+            answer.update({"kpis_strong": [2, 9], "kpis_partial": ["1"]})
+            return json.dumps(answer)
+        return out
+
+
+def _kpi_prompts(db):
+    for cat in ("Environment", "Social", "Governance"):
+        db.esg_prompts.insert_one({"category": cat, "prompt": f"[{cat}] score this:\n1. {cat} A\n2. {cat} B\n\nText:\n{{text}}"})
+
+
+def test_one_scoring_call_names_kpis_and_score_is_kpi_coverage(db, monkeypatch):
+    _kpi_prompts(db)
+    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
+    # One call per page and category -- the scoring call itself asks for the KPIs -- plus
+    # the three keyword-ranking calls. No separate KPI call.
+    scoring = [c for c in fake.calls if "score this" in c]
+    assert len(scoring) == 6 and all('"kpis_strong"' in c for c in scoring)
+    assert len(fake.calls) == 6 + 3
+    # Category score = KPI coverage (B strong 100, A partial 50 -> 75), not the page average.
+    assert final["environmental_score"] == 75 and final["social_score"] == 75 and final["governance_score"] == 75
+    pages = [r for r in db.esg_report.find_one({"company_id": cid})["analysis"] if "category" in r]
+    assert len(pages) == 6
+    assert all(r["kpis"] == [f"{r['category']} B", f"{r['category']} A (partial)"] for r in pages)
+
+
+def test_zero_score_category_gets_no_kpis(db, monkeypatch):
+    _kpi_prompts(db)
+    # The answers still name KPIs, but every Environment page scored 0.
+    fake = KpiFakeLLM({"Environment": 0, "Social": 60, "Governance": 50})
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025")
+    pages = [r for r in db.esg_report.find_one({"company_id": cid})["analysis"] if "category" in r]
+    assert [r["kpis"] for r in pages if r["category"] == "Environment"] == [[]]
+    assert final["environmental_score"] == 0 and final["social_score"] == 75
+
+
+def test_answers_naming_no_kpis_score_zero(db, monkeypatch):
+    _kpi_prompts(db)
+    fake = FakeLLM({"Environment": 50, "Social": 50, "Governance": 50})  # never names a KPI
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
+    cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025")
+    assert final["composite_score"] == 0
+    pages = [r for r in db.esg_report.find_one({"company_id": cid})["analysis"] if "category" in r]
+    assert [r["kpis"] for r in pages] == [[], [], []]
+
+
 def test_cache_hit_returns_early_without_new_rows(db, prompts, monkeypatch):
     fake = FakeLLM({"Environment": 50, "Social": 50, "Governance": 50})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)

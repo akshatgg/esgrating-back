@@ -1,9 +1,26 @@
-import logging, smtplib, ssl
+import logging, re, smtplib, ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from app.core.config import settings
+from app.core.errors import UserError
 
 log = logging.getLogger(__name__)
+
+# One address only: no spaces, commas or semicolons, so a recipient field cannot
+# smuggle in extra addresses.
+_EMAIL_RE = re.compile(r"^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$")
+
+
+def resolve_recipient(override: str | None, stored: str | None) -> str:
+    """Who a report is sent to: the address the admin typed in the Send dialog, else
+    the one the submitter gave on the form. Raises UserError (422) when neither is a
+    valid single address."""
+    to = (override or "").strip() or (stored or "").strip()
+    if not to:
+        raise UserError("Enter an email address to send the report to.")
+    if not _EMAIL_RE.match(to):
+        raise UserError("Please enter a valid email")
+    return to
 
 
 class MailError(Exception):

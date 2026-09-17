@@ -10,10 +10,15 @@
 import ast
 import concurrent.futures
 import hashlib
+import json
 import logging
+import re
 from collections import Counter
 from datetime import datetime
 
+from app.core.kpis import (
+    coverage_detail, kpi_strengths, kpis_from_response, page_sort_key, parse_kpi_list, with_kpi_field,
+)
 from app.esg import llm as llm_mod
 from app.esg.extract import process_files, split_text_into_chunks
 from app.esg.store import insert_esg_collection, store_llm_response, get_llm_response, read_prompt
@@ -28,10 +33,30 @@ def generate_hash(text, algorithm='sha256'):
     return hash_object.hexdigest()
 
 
+# Added (2026-09-11): scoring is KPI-based (app/core/kpis.py). Each esg_prompts prompt
+# lists its category's numbered KPIs; the scoring call is asked to name the ones it scored
+# the page on (kpis_present), so the score and the export's "KPIs Present" column come
+# from the same answer. The KPI lists are read from esg_prompts, so they follow whatever
+# the prompts say.
+prompt_kpis = parse_kpi_list
+
+
+def attach_page_kpis(esg_records):
+    """Put on each page record the KPIs its own scoring answer named, in the prompt's
+    wording. No extra calls: it reads the answers already stored on the records."""
+    kpi_lists = {cat: prompt_kpis(read_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
+    for r in esg_records:
+        try:
+            parsed = ast.literal_eval(r["analysis"])  # parsed the way aggregate_scores parses it
+        except Exception:
+            parsed = None
+        r["kpis"] = kpis_from_response(parsed, kpi_lists.get(r["category"], []))
+
+
 def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
-        prompt = read_prompt(category)
+        prompt = with_kpi_field(read_prompt(category))  # KPI-based scoring (see attach_page_kpis)
         prompt = prompt.format(
             text=text
         )
@@ -145,7 +170,9 @@ def evaluate_score(score):
     else:
         return "D", "Below Average"
 
-def calculate_esg_score_concurrent(files, company_id, report_year):
+def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=True):
+    # Added: use_cache=False skips the esg_hashes lookup so the report is scored fresh;
+    # the new result is still stored and cached, and supersedes the old entry.
     try:
         processed_data = process_files(files)
         if not processed_data:
@@ -163,7 +190,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             hash_text = generate_hash(processed_data)
             logger.info(f"Company Hash: {hash_text}")
 
-            llm_response = get_llm_response(hash_text)
+            llm_response = get_llm_response(hash_text) if use_cache else None
             if llm_response:
                 return llm_response
 
@@ -197,7 +224,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             hash_text = generate_hash(combined_text)
             logger.info(f"Company Hash: {hash_text}")
 
-            llm_response = get_llm_response(hash_text)
+            llm_response = get_llm_response(hash_text) if use_cache else None
             if llm_response:
                 return llm_response
 
@@ -252,6 +279,41 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
                     "positive_keywords": []
                 }
 
+        # Added (2026-09-11): KPI-coverage scoring (app/core/kpis.py). A category's score is
+        # how well the whole report proves its prompt's KPIs, built from the KPIs each page's
+        # scoring answer named -- not the average of the page scores. A prompt without a
+        # numbered KPI list keeps the original average.
+        # The same numbers, KPI by KPI, go into the report as its KPI Assessment.
+        kpi_coverage = {}
+        page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
+        for category in scores:
+            kpis = prompt_kpis(read_prompt(category))
+            if not kpis:
+                continue
+            entries = []
+            for rec in esg_records:  # page records only: the final report is appended later
+                if rec.get("category") != category:
+                    continue
+                try:
+                    parsed = ast.literal_eval(rec["analysis"])
+                except Exception:
+                    continue
+                strengths = kpi_strengths(parsed, kpis)
+                entries.append((rec.get("page_no"), strengths))
+                if isinstance(parsed, dict) and rec.get("page_no") is not None:
+                    # Saved with the result for the Detailed Report's Page Scores and
+                    # Scoring Rationale: the page's score, its KPIs and the AI's reason.
+                    page_rows.setdefault(rec["page_no"], {})[category] = {
+                        "score": parsed.get("score"),
+                        "kpis": len(strengths),
+                        "kpi_names": kpis_from_response(parsed, kpis),
+                        "reason": str(parsed.get("reason") or ""),
+                    }
+            detail = coverage_detail(entries, kpis)
+            detail["score"] = round(detail["score"], 2)
+            final_scores[category]["score"] = detail["score"]
+            kpi_coverage[category] = detail
+
         # Final report
         final_report_data = {
             "environmental_score": final_scores['Environment']['score'],
@@ -269,6 +331,11 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             "governance_top_keywords": final_scores['Governance']['positive_keywords'],
             "report_date": datetime.now().strftime('%Y-%m-%d')
         }
+        if kpi_coverage:
+            final_report_data["kpi_coverage"] = kpi_coverage
+            final_report_data["page_scores"] = [
+                {"page": p, **page_rows[p]} for p in sorted(page_rows, key=page_sort_key)
+            ]
 
         # Breakage (spec): if every category failed to score anything, the LLM never worked
         # (revoked key, no quota, ...). The aggregation except-path sets sector/industry to
@@ -299,6 +366,13 @@ def calculate_esg_score_concurrent(files, company_id, report_year):
             performance, label = evaluate_score(score)
             final_report_data[f"{key}_score_performance"] = performance
             final_report_data[f"{key}_score_performance_label"] = label
+
+        # Page KPIs for the export -- after scoring, so they cannot change a score, and
+        # never allowed to fail a run that has already scored.
+        try:
+            attach_page_kpis(esg_records)
+        except Exception as e:
+            logger.error(f"KPI tagging skipped: {e}")
 
         # Insert ESG data
         esg_records.append(final_report_data)
