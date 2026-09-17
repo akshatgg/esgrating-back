@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.errors import UserError
 from app.core.jobs import start_job
 from app.core.mail import Attachment, mail_configured, resolve_recipient, send_mail
+from app.reports import summary as rating_summary
 from app.core.mail_templates import compose, reset_template, save_template, template_response
 from app.core.net import client_ip
 from app.core.page_scores import csv_response, keywords_cell, kpis_cell
@@ -422,6 +423,11 @@ async def send_report(id: str, pdfs: list[UploadFile] = File(...), email: str = 
         if not data.startswith(b"%PDF"):
             raise UserError("File content does not match its type.")
         attachments.append(Attachment(SEND_FILE_NAMES[i].format(id=id), data, "application/pdf"))
+
+    # The Rating Summary (.docx) goes with the reports when the report has KPI scores.
+    if rating_summary.available("bfsi", doc):
+        attachments.append(Attachment(rating_summary.filename("bfsi", doc),
+                                      rating_summary.build_summary("bfsi", doc), rating_summary.DOCX_MIME))
 
     send_mail([to], mail_subject, mail_body, cc=[settings.team_email], attachments=attachments)
 

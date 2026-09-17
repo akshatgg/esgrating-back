@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.auth.deps import require_admin
 from app.bfsi import store as bfsi_store
 from app.core.uploads import read_limited
 from app.esg.submissions import esg_submissions_collection, serialize_doc
-from app.reports import editing
+from app.reports import editing, summary
 from app.reports.logo import MAX_LOGO_BYTES, delete_logo_file, logo_media_type, logo_path, save_logo
 
 router = APIRouter(prefix="/api/admin", tags=["admin-reports"])
@@ -187,6 +187,18 @@ def reset_edits(kind: str, id: str, admin: str = Depends(require_admin)):
     _apply(col, doc, update)
     delete_logo_file(_logo_name(doc))
     return _report(kind, _reload(col, doc))
+
+
+@router.get("/{kind}/submissions/{id}/summary")
+def download_summary(kind: str, id: str, admin: str = Depends(require_admin)):
+    """The ESG Rating Summary as a Word document (app/reports/summary.py)."""
+    _col, doc = _load(kind, id)
+    _not_running(doc)
+    data = summary.build_summary(kind, doc)
+    return Response(data, media_type=summary.DOCX_MIME, headers={
+        "Content-Disposition": f'attachment; filename="{summary.filename(kind, doc)}"',
+        "Cache-Control": "no-store",
+    })
 
 
 @router.post("/{kind}/submissions/{id}/report/logo")
