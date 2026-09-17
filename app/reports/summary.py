@@ -183,8 +183,10 @@ def build_facts(kind: str, doc: dict) -> dict:
         gaps = sorted((r for r in rows if r["score"] == 0),
                       key=lambda r: weakest_themes.index(r["theme"]) if r["theme"] in weakest_themes else 99)
         grade, label = _grade(scores[code])
+        detail = coverage.get(name) or {}
         pillars[code] = {
             "name": name, "score": scores[code], "grade": grade, "label": label, "themes": theme_list,
+            "kpi_total": float(detail.get("score") or 0), "manual": detail.get("analyst_score") is not None,
             "strong": strong[:5], "gaps": gaps[:5], "kpi_count": len(rows),
         }
         for r in strong[:KPI_ROWS_PER_PILLAR // 2] + gaps[:KPI_ROWS_PER_PILLAR // 2]:
@@ -238,6 +240,7 @@ def _narrative_input(f: dict) -> dict:
         "company": f["company"], "sector": f["sector"],
         "overall": {"score": round(f["overall"], 2), "grade": f["grade"], "label": f["label"], "weights": f["weights"]},
         "pillars": {c: {"name": p["name"], "score": round(p["score"], 2), "grade": p["grade"],
+                        **({"set_by_analyst": True, "kpi_total": round(p["kpi_total"], 2)} if p["manual"] else {}),
                         "themes": [{"name": t["name"], "score": t["score"], "found": t["note"]} for t in p["themes"]],
                         "strongest_kpis": [f"{r['kpi']} ({_fmt(r['score'])})" for r in p["strong"]],
                         "kpis_not_disclosed": [f"{r['kpi']} ({r['theme']})" if r["theme"] else r["kpi"]
@@ -463,6 +466,11 @@ def render(facts: dict, text: dict) -> bytes:
         values[f"{code}_STRONG_DRIVERS"] = "; ".join(f"{r['kpi']} ({_fmt(r['score'])})" for r in p[code]["strong"][:3]) or "No KPI evidence found"
         values[f"{code}_GAPS"] = "; ".join(r["kpi"] for r in p[code]["gaps"][:3]) or "No KPI gaps"
     _replace_all(d, values)
+    # Scorecard: a pillar set by an analyst says so, with the KPI total beside it.
+    for row, code in zip(list(scorecard.rows)[1:4], "ESG"):
+        if p[code]["manual"]:
+            _set_paragraph(row.cells[3].paragraphs[0],
+                           f"{p[code]['label']} (set by analyst; KPI total {_fmt(p[code]['kpi_total'])})")
 
     out = io.BytesIO()
     d.save(out)

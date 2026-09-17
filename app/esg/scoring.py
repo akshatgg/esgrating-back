@@ -201,6 +201,18 @@ def rescore_category(detail: dict, scores: dict[str, float]) -> dict:
     return detail
 
 
+def mark_pillar(detail: dict, pillar_score) -> None:
+    """Record on a KPI Assessment the pillar score the report actually uses when an
+    analyst set it by hand, so every report shows that number beside the KPI total
+    instead of contradicting it. Cleared when the two agree again."""
+    if not isinstance(detail, dict):
+        return
+    if isinstance(pillar_score, (int, float)) and abs(float(pillar_score) - float(detail.get("score") or 0)) > 0.005:
+        detail["analyst_score"] = round(float(pillar_score), 2)
+    else:
+        detail.pop("analyst_score", None)
+
+
 def kpi_best(row: dict) -> float:
     """A KPI Assessment row's best score. Older reports stored points (100 / 50 / 0),
     which are on the same 0-100 scale."""
@@ -271,7 +283,10 @@ def kpi_summary_rows(coverage, totals: dict, weights_label: str, overall, grade:
         for r in detail.get("kpis") or []:
             pages = ", ".join(str(p) for p in r.get("pages") or []) or "-"
             rows.append([cat, r.get("kpi", ""), _num(kpi_best(r)), pages])
-        rows.append([f"{cat} total", "", _num(float(totals.get(cat) or 0)), ""])
+        total = float(totals.get(cat) or 0)
+        note = (f"Set by analyst (KPI total {_num(float(detail.get('score') or 0))})"
+                if detail.get("analyst_score") is not None else "")
+        rows.append([f"{cat} total", "", _num(total), note])
     rows.append(["Overall", weights_label, f"{float(overall or 0):.2f}", f"Grade {grade}"])
     return rows
 

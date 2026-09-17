@@ -559,6 +559,11 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
                 final["kpi_coverage"][name] = detail
                 if edits["pillar_overrides"][cat] is None:
                     final[key] = detail["score"]
+        if isinstance(final.get("kpi_coverage"), dict):
+            # A pillar typed by hand: the KPI Assessment carries it beside the KPI total, so
+            # the detailed report, CSV and summary all show the same pillar score.
+            for cat in CATS:
+                esg_scoring.mark_pillar(final["kpi_coverage"].get(ESG_CATEGORY[cat]), final[f"{ESG_PREFIX[cat]}_score"])
         if any(final[f"{ESG_PREFIX[c]}_score"] != base.get(f"{ESG_PREFIX[c]}_score") for c in CATS):
             # Each report keeps the weights it was scored with (older reports: 30/30/40).
             final["composite_score"] = composite_score(
@@ -604,6 +609,8 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
                 scores[cat] = float(detail["score"])
         if scores[cat] != base.get(key):
             ai[key] = scores[cat]
+        if isinstance(ai.get("kpi_coverage"), dict):
+            esg_scoring.mark_pillar(ai["kpi_coverage"].get(ESG_CATEGORY[cat]), scores[cat])
     reasons = ai.get("reasons")
     for cat in CATS:
         for r in eff_pages[cat]:

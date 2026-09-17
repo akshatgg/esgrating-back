@@ -177,3 +177,12 @@ def test_send_attaches_the_summary(admin_client, db, fake_ai, monkeypatch):
     names = [a.filename for a in sent[0]]
     assert names[0] == "esg_report.pdf" and re.fullmatch(r"esg-rating-summary-acme-ltd-[0-9a-f]{6}\.docx", names[1])
     assert sent[0][1].mime == summary.DOCX_MIME
+
+
+def test_summary_scorecard_shows_a_pillar_set_by_analyst(admin_client, db, fake_ai):
+    sid = _esg(db)
+    admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits", json={"pillar_overrides": {"E": 80}})
+    text = _text_of(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content)
+    assert "Environment | 80 | A | Excellent (set by analyst; KPI total 43.33)" in text
+    assert "ENVIRONMENT\n80\nA · Excellent" in text
+    assert '"set_by_analyst": true' in fake_ai[-1][1]
