@@ -9,9 +9,9 @@ class Settings(BaseSettings):
     mongo_url: str = "mongodb://localhost:27017"
     mongo_db: str = "esg_score_calculator"
     esg_openai_api_key: str = ""
-    esg_openai_model: str = "gpt-3.5-turbo-1106"
+    esg_openai_model: str = "gpt-4.1-mini"
     bfsi_openai_api_key: str = ""
-    bfsi_openai_model: str = "gpt-4o-mini"
+    bfsi_openai_model: str = "gpt-4.1-mini"
     session_secret: str = "dev-insecure-change-me"
     session_ttl_hours: int = 8
     upload_dir: Path = Path("./uploads")
