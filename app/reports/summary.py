@@ -29,6 +29,7 @@ from fastapi import HTTPException
 from app.bfsi import store as bfsi_store
 from app.bfsi.options import INDUSTRIES
 from app.bfsi.scoring import bfsi_overall, is_kpi_scored
+from app.core.config import settings
 from app.core.db import get_db
 from app.esg import scoring
 from app.esg.submissions import esg_submissions_collection
@@ -41,6 +42,12 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 PILLARS = (("E", "Environment"), ("S", "Social"), ("G", "Governance"))
 PREFIX = {"E": "environmental", "S": "social", "G": "governance"}
 KPI_ROWS_PER_PILLAR = 4  # 2 strongest + 2 largest gaps -> 12 rows
+# How many of a pillar's KPIs the written summary is given. Every KPI the report scored,
+# with the reason it scored it, and every gap -- the analysis already spends hundreds of
+# calls scoring them, and this is one prompt, not more calls, so there is no reason to
+# show the writer five of sixty (user, 2026-09-20). The cap only stops a pathological
+# KPI library from running away with the context.
+NARRATIVE_KPIS = 80
 
 NOT_AVAILABLE = ("The rating summary needs a KPI-scored report. Re-run the analysis with "
                  "\"Use cached result\" unticked, then download it again.")
@@ -164,7 +171,10 @@ def build_facts(kind: str, doc: dict) -> dict:
     pillars, kpi_rows, total, found, specific = {}, [], 0, 0, 0
     for code, name in PILLARS:
         rows = [{"key": r["kpi"], "kpi": r["kpi"].strip().rstrip("."), "score": scoring.kpi_best(r),
-                 "pages": r.get("pages") or [], "evidence": r.get("evidence") or {}}
+                 "pages": r.get("pages") or [], "evidence": r.get("evidence") or {},
+                 # A score held down to 20 by a poor page reads as a contradiction next to
+                 # its own strong evidence unless the writer is told why.
+                 "capped": bool(r.get("capped"))}
                 for r in (coverage.get(name) or {}).get("kpis") or []]
         lookup = _themes_lookup(code)
         themes = {}
@@ -198,7 +208,7 @@ def build_facts(kind: str, doc: dict) -> dict:
         pillars[code] = {
             "name": name, "score": scores[code], "grade": grade, "label": label, "themes": theme_list,
             "kpi_total": float(detail.get("score") or 0), "manual": detail.get("analyst_score") is not None,
-            "strong": strong[:5], "gaps": gaps[:5], "kpi_count": len(rows),
+            "strong": strong[:NARRATIVE_KPIS], "gaps": gaps[:NARRATIVE_KPIS], "kpi_count": len(rows),
         }
         for r in strong[:KPI_ROWS_PER_PILLAR // 2] + gaps[:KPI_ROWS_PER_PILLAR // 2]:
             kpi_rows.append({**r, "pillar": name})
@@ -250,16 +260,52 @@ NARRATIVE_SYSTEM = (
     "evidence and their themes -- and name missing KPIs only as absent disclosure, in the order "
     "given. Priorities must stay inside the themes this report already covers; never recommend "
     "work in an area the report shows no involvement in.\n"
+    # Strengths and weaknesses are written the way a rating rationale reads: a headline
+    # naming the driver, then a paragraph of the evidence behind it -- not a list of KPI
+    # names (user, 2026-09-20).
+    "Each strength and weakness is a DRIVER, not a KPI name. Its 'headline' names the driver "
+    "in the company's own terms (for example 'Low environmental footprint arising from the "
+    "nature of operations'), never a bare KPI name and never a score. Its 'detail' is one "
+    "paragraph of 70 to 120 words that groups the KPIs behind that driver, gives what their "
+    "evidence actually showed -- the figures, targets, certifications, pages -- and ends with "
+    "what it means for this rating. Quote a KPI's score only where it carries the point; never "
+    "list KPI names one after another, and never repeat a driver already covered.\n"
+    "A weakness says what the report does not evidence or evidences weakly, why that matters "
+    "for the rating, and what disclosure would raise it -- drawn only from the gaps supplied.\n"
+    "'favourable_factors' and 'constraints' are the two halves of the rating rationale, each "
+    "one paragraph of 70 to 120 words: what the score favourably factors in, and what it is "
+    "constrained by. Together they must explain the grade to a reader who sees nothing else.\n"
+    # The body of the report: a written assessment of each pillar, the way a rating agency
+    # writes one, not a summary of the table above it (user, 2026-09-20).
+    "Each entry of 'pillar_narratives' is the WRITTEN ASSESSMENT of that pillar: THREE OR "
+    "FOUR paragraphs, 250 to 400 words in total, separated by a blank line. Work through the "
+    "pillar theme by theme, in the order the evidence makes sense, and in each paragraph give "
+    "what the report actually showed -- the figures, targets, certifications, policies, "
+    "programmes and the pages they came from -- then say whether that is good or weak "
+    "performance and why. Say plainly where the company does well and where it falls short, "
+    "and close the pillar by linking what you described to the score it received.\n"
+    "Write continuous prose. Never a list of KPI names, never 'scores 100 in X, Y and Z', "
+    "never a sentence whose subject is a KPI name or a score: the reader wants the company's "
+    "performance, with the KPI evidence as the support for it. Name a score only where it "
+    "carries the point. Where a pillar's evidence is thin, say so and say what is missing "
+    "instead of padding the paragraphs.\n"
     "Plain professional English, short sentences. Respond in JSON with exactly these fields and "
     "no others: "
     '{"executive_summary": "<3-4 sentences>", "key_rating_drivers": "<1 sentence>", '
+    '"favourable_factors": "<one paragraph>", "constraints": "<one paragraph>", '
     '"disclosure_headline": "<1 sentence on how complete and specific the evidence is>", '
-    '"pillar_narratives": {"E": "<2-3 sentences>", "S": "<2-3 sentences>", "G": "<2-3 sentences>"}, '
-    '"strengths": [<5 short strings>], "weaknesses": [<5 short strings>], '
+    '"pillar_narratives": {"E": "<3-4 paragraphs, blank line between them>", '
+    '"S": "<3-4 paragraphs>", "G": "<3-4 paragraphs>"}, '
+    '"strengths": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
+    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
     '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
     '"rating_rationale": "<3-4 sentences linking drivers to the final score>", '
     '"rating_interpretation": "<2 sentences on how to read this grade>"}'
 )
+
+# Bumped whenever the shape above changes: the fingerprint is over the rating data, so
+# without it a report cached under the old shape would keep serving the old text.
+NARRATIVE_VERSION = 3
 
 
 def _kpi_evidence(r: dict) -> str:
@@ -268,6 +314,8 @@ def _kpi_evidence(r: dict) -> str:
     kpi_reasons), so the summary text is written from the evidence, not from the number
     alone."""
     text = f"{r['kpi']} ({_fmt(r['score'])})"
+    if r.get("capped"):
+        text += " [held down: a page showed poor performance]"
     ev = r.get("evidence") or {}
     if ev.get("reason"):
         page = f"p.{ev['page']}" if ev.get("page") is not None else "the report"
@@ -294,10 +342,18 @@ def _narrative_input(f: dict) -> dict:
     }
 
 
+def ai_configured(kind: str) -> bool:
+    """Whether this calculator has an OpenAI key. Without one there is nothing to ask, and
+    trying anyway costs a full round of network retries before it fails."""
+    return bool(settings.bfsi_openai_api_key if kind == "bfsi" else settings.esg_openai_api_key)
+
+
 def _ask_ai(kind: str, system: str, user: str) -> dict:
     if kind == "bfsi":
-        from app.bfsi.openai_client import get_client
-        return get_client().json(user, system)
+        # Through the module, not `from ... import get_client`: that way one patched
+        # client serves every caller.
+        from app.bfsi import openai_client
+        return openai_client.get_client().json(user, system)
     from app.esg import llm as llm_mod
     raw = llm_mod.get_llm().generate_score(system + "\n\n" + user)
     return json.loads(raw)
@@ -310,7 +366,7 @@ def _collection(kind: str):
 def narrative(kind: str, doc: dict, facts: dict) -> dict:
     payload = _narrative_input(facts)
     user = "Rating data (JSON):\n" + json.dumps(payload, ensure_ascii=False)
-    fingerprint = hashlib.sha256(user.encode()).hexdigest()
+    fingerprint = hashlib.sha256(f"v{NARRATIVE_VERSION}\n{user}".encode()).hexdigest()
     cached = doc.get("summary_ai") or {}
     if cached.get("fingerprint") == fingerprint and isinstance(cached.get("text"), dict):
         return cached["text"]
@@ -407,6 +463,27 @@ def _list(items, n: int) -> list[str]:
     return items[:n]
 
 
+def drivers(items, n: int = 5) -> list[dict]:
+    """The strengths/weaknesses as {headline, detail}. Text written before the drivers
+    shape (a plain string per item) still reads: it becomes the detail with no headline."""
+    out = []
+    for item in (items or [])[:n]:
+        if isinstance(item, dict):
+            headline = str(item.get("headline") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+        else:
+            headline, detail = "", str(item or "").strip()
+        if headline or detail:
+            out.append({"headline": headline, "detail": detail})
+    return out
+
+
+def _driver_lines(items, n: int = 5) -> list[str]:
+    """The same drivers as one string each, for the Word document's numbered cells."""
+    return [f"{d['headline']} \u2014 {d['detail']}" if d["headline"] and d["detail"]
+            else (d["headline"] or d["detail"]) for d in drivers(items, n)]
+
+
 def render(facts: dict, text: dict) -> bytes:
     d = docx.Document(str(TEMPLATE))
     body = list(d.element.body.iterchildren())
@@ -458,8 +535,8 @@ def render(facts: dict, text: dict) -> bytes:
     _drop_column(kpi_table, 4, give_width_to=5)
     _fill_rows(kpi_table, [[r["pillar"], r["theme"] or "—", r["kpi"], _fmt(r["score"]), _pages(r["pages"]),
                             _status(r["score"]), _level_text(r["score"])] for r in facts["kpi_rows"]])
-    _numbered(strengths_box.rows[0].cells[0], _list(text.get("strengths"), 5))
-    _numbered(strengths_box.rows[0].cells[1], _list(text.get("weaknesses"), 5))
+    _numbered(strengths_box.rows[0].cells[0], _driver_lines(text.get("strengths")))
+    _numbered(strengths_box.rows[0].cells[1], _driver_lines(text.get("weaknesses")))
     priorities = [p for p in text.get("priorities") or [] if isinstance(p, dict)][:5]
     _fill_rows(priorities_table, [[str(i), p.get("area", ""), p.get("gap", ""), p.get("why", ""), p.get("action", "")]
                                   for i, p in enumerate(priorities, 1)])
@@ -519,6 +596,23 @@ def render(facts: dict, text: dict) -> bytes:
     out = io.BytesIO()
     d.save(out)
     return out.getvalue()
+
+
+def write_narrative(kind: str, doc: dict) -> bool:
+    """Write the rating narrative for a freshly analysed report and store it, so the
+    detailed report and the Word summary both open with the text already there
+    (user, 2026-09-20).
+
+    Best effort by design: a failed AI call must never fail the analysis that produced a
+    perfectly good set of scores. The text is then written on first download instead."""
+    try:
+        if not available(kind, doc) or not ai_configured(kind):
+            return False
+        narrative(kind, doc, build_facts(kind, doc))
+        return True
+    except Exception as e:
+        logger.warning("rating narrative not written for %s %s: %s", kind, doc.get("_id"), e)
+        return False
 
 
 def available(kind: str, doc: dict) -> bool:

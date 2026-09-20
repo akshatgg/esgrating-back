@@ -106,11 +106,22 @@ def test_public_submit_invalid_mobile(client):
     assert resp.json()["detail"] == "Please enter a valid phone number"
 
 
-def test_public_submit_invalid_report_year(client):
-    form = {**VALID_FORM, "report_year": "2024"}
+@pytest.mark.parametrize("bad", ["20245", "2024-", "2024-20255", "FY2024", "2024/2025", "2024 2025"])
+def test_public_submit_invalid_report_year(client, bad):
+    form = {**VALID_FORM, "report_year": bad}
     resp = client.post("/api/esg/submissions", data=form, files=_pdf_file())
     assert resp.status_code == 422
-    assert resp.json()["detail"] == "Report financial year must look like 2024-2025"
+    assert resp.json()["detail"] == "Report financial year must look like 2024-2025 or 2025"
+
+
+@pytest.mark.parametrize("year", ["2024-2025", "2025"])
+def test_public_submit_accepts_single_year_and_range(client, db, year):
+    """A company whose reporting period is one calendar year submits "2025"; the
+    financial-year range still works (user, 2026-09-20)."""
+    form = {**VALID_FORM, "report_year": year}
+    resp = client.post("/api/esg/submissions", data=form, files=_pdf_file())
+    assert resp.status_code == 201
+    assert db.esg_submissions.find_one({"_id": ObjectId(resp.json()["id"])})["report_year"] == year
 
 
 def test_public_submit_missing_file(client):

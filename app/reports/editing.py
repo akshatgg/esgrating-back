@@ -61,6 +61,11 @@ HEADING_KEYS = {
 }
 
 _SHORT, _LONG, _LIST, _CATLISTS, _REASONS = "short", "long", "list", "catlists", "reasons"
+# A fixed set of values, the first one the default. A choice is how the sheet is told
+# to show NOTHING: blank text is 'no override' everywhere here (see normalize_edits),
+# so text alone could never hide anything (user, 2026-09-20).
+_CHOICE = "choice"
+CHOICES = {"header_slot": ("text", "logo", "none")}
 
 FIELD_SPECS = {
     "esg": {
@@ -68,6 +73,9 @@ FIELD_SPECS = {
         "environmental_top_keywords": _LIST, "social_top_keywords": _LIST,
         "governance_top_keywords": _LIST,
         "reasons": _REASONS,
+        # The sheet's top-right corner (its text, an uploaded logo, or nothing) and
+        # the optional line along the bottom.
+        "header_slot": _CHOICE, "footer_note": _LONG,
     },
     "bfsi": {
         "company": _SHORT, "sector": _SHORT, "industry": _SHORT, "fy": _SHORT, "report_date": _SHORT,
@@ -75,6 +83,9 @@ FIELD_SPECS = {
         "climate_risk": _LONG, "governance_summary": _LONG, "recommendation": _SHORT,
         "keywords": _CATLISTS, "negative_keywords": _CATLISTS,
         "reasons": _REASONS,
+        # The sheet's top-right corner (its text, an uploaded logo, or nothing) and
+        # the optional line along the bottom.
+        "header_slot": _CHOICE, "footer_note": _LONG,
     },
 }
 FIELD_KEYS = {kind: list(spec) for kind, spec in FIELD_SPECS.items()}
@@ -155,13 +166,14 @@ def empty_edits() -> dict:
         "kpi_scores": {c: {} for c in CATS},
         "pillar_overrides": {c: None for c in CATS},
         "logo": None,
+        "corner_logo": None,
     }
 
 
 # Keys of the body besides the edits proper: ignored (the web may send back the edits
 # object it got from GET). The logo is only ever changed through the logo routes, so a
 # stale edits object can never undo an upload.
-_IGNORED_BODY_KEYS = {"logo", "updated_at", "updated_by"}
+_IGNORED_BODY_KEYS = {"logo", "corner_logo", "updated_at", "updated_by"}
 
 
 def normalize_edits(kind: str, payload, ctx: dict) -> dict:
@@ -206,6 +218,14 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
             text = _text(value, f"Field {key!r}", SHORT_MAX if spec == _SHORT else LONG_MAX,
                          multiline=spec == _LONG)
             if text != "":
+                out["fields"][key] = text
+        elif spec == _CHOICE:
+            text = _text(value, f"Field {key!r}", SHORT_MAX)
+            allowed = CHOICES[key]
+            if text != "" and text not in allowed:
+                raise UserError(f"Field {key!r} must be one of: {', '.join(allowed)}.")
+            # The first value is the default: it needs no override stored.
+            if text not in ("", allowed[0]):
                 out["fields"][key] = text
         elif spec == _LIST:
             items = _text_list(value, f"Field {key!r}")
@@ -299,6 +319,7 @@ def stored_edits(doc: dict) -> dict:
         out["kpi_scores"][c] = dict((raw.get("kpi_scores") or {}).get(c) or {})
         out["pillar_overrides"][c] = (raw.get("pillar_overrides") or {}).get(c)
     out["logo"] = raw.get("logo")
+    out["corner_logo"] = raw.get("corner_logo")
     out["updated_at"] = raw.get("updated_at")
     out["updated_by"] = raw.get("updated_by")
     return out
@@ -306,7 +327,7 @@ def stored_edits(doc: dict) -> dict:
 
 def is_edited(doc: dict) -> bool:
     edits = doc.get("report_edits")
-    return edits_have_content(edits) or bool((edits or {}).get("logo"))
+    return edits_have_content(edits) or any((edits or {}).get(k) for k in ("logo", "corner_logo"))
 
 
 # --- report context: original values and page lists ---------------------------------------
@@ -531,7 +552,8 @@ def _pillar(cat: str, rows: list, edits: dict, original_score, average):
     return original_score
 
 
-def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None = None) -> dict:
+def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None = None,
+            corner_logo_url: str | None = None) -> dict:
     """{effective, pages, stored} where `stored` is the $set that writes the effective
     values into the submission's own report fields."""
     eff_pages = _effective_pages(ctx, edits)
@@ -584,6 +606,7 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             "fy": fields.get("fy", doc.get("report_year")),
             "headings": headings,
             "logo_url": logo_url,
+            "corner_logo_url": corner_logo_url,
             "pillar_manual": manual,
         }
         return {"effective": effective, "pages": _pages_response(eff_pages), "kpis": eff_kpis,
@@ -653,6 +676,7 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
         "report_date": fields.get("report_date"),
         "headings": headings,
         "logo_url": logo_url,
+        "corner_logo_url": corner_logo_url,
     }
     stored = {
         "e_score": scores["E"],

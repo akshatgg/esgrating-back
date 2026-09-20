@@ -357,3 +357,47 @@ def test_scoring_uses_esg_kpis_with_sub_pillar_context(db, monkeypatch):
     # Same flow: best KPI scores over all 3 KPIs -> (32 + 80 + 0) / 300 -> 37.33
     assert final["environmental_score"] == 37.33
     assert [k["kpi"] for k in final["kpi_coverage"]["Environment"]["kpis"]] == ["Water targets", "Water withdrawn", "Waste policy"]
+
+
+class ReasoningFakeLLM(FakeLLM):
+    """Answers the way SCORE_GUIDE asks a real scoring call to: KPI scores plus one
+    reason line per KPI, "<point> <score>: <what the page showed>". Page 1 proves both
+    KPIs well, page 2 shows poor performance on point 1."""
+
+    def generate_score(self, text):
+        out = super().generate_score(text)
+        if '"kpi_scores"' not in text:
+            return out
+        answer = json.loads(out)
+        if "p2 text" in text:
+            answer.update({"kpi_scores": [[1, 15]],
+                           "reason": "1 15: fined for a discharge breach, emissions up 4%"})
+        else:
+            answer.update({"kpi_scores": [[1, 85], [2, 61]],
+                           "reason": "1 85: cut 22% against a 2030 target\n2 61: recycling at 31%"})
+        return json.dumps(answer)
+
+
+def test_a_fresh_analysis_carries_the_reason_for_every_scored_kpi(db, monkeypatch):
+    """What the report's Reason column shows: each scored KPI keeps why it scored that,
+    from the same call that scored it, including the other pages that scored it."""
+    _kpi_prompts(db)
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: ReasoningFakeLLM({"Environment": 90, "Social": 90, "Governance": 90}))
+    cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
+
+    final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
+
+    assert final["scoring_method"] == "kpi_score"
+    kpis = {k["kpi"]: k for k in final["kpi_coverage"]["Environment"]["kpis"]}
+
+    # Point 1 scored 85 on one page and 15 on another: held at 20, and the reason leads
+    # with the page that held it there, with the strong page kept beside it.
+    held = kpis["Environment A"]
+    assert held["score"] == 20 and held["capped"] is True
+    assert held["evidence"]["reason"] == "fined for a discharge breach, emissions up 4%"
+    assert held["evidence"]["also"][0]["reason"] == "cut 22% against a 2030 target"
+
+    # A KPI scored on one page only keeps that page's reason and has nothing beside it.
+    plain = kpis["Environment B"]
+    assert plain["score"] == 61 and plain["evidence"]["reason"] == "recycling at 31%"
+    assert "also" not in plain["evidence"]

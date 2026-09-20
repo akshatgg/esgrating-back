@@ -109,3 +109,53 @@ def test_negative_keywords_without_a_poor_score_are_flagged_for_review():
     assert scoring.contradiction(answer, {"A": 70.0, "B": 12.0}) == ""
     assert scoring.contradiction({"negative_keywords": []}, {"A": 70.0}) == ""
     assert scoring.contradiction(answer, {}) == "" and scoring.contradiction("boom", {"A": 70.0}) == ""
+
+
+# --- why a KPI scored what it scored (the Reason column) -- user, 2026-09-20 ---------
+
+def _entries(*rows):
+    """(score, page, reason) as category_detail collects them."""
+    return list(rows)
+
+
+def test_evidence_keeps_the_other_pages_that_scored_the_kpi():
+    ev = scoring._evidence(_entries((85, 11, "down 22% vs a 2030 target"),
+                                    (61, 52, "renewables at 31%"),
+                                    (40, 60, "policy only")), capped=False)
+    assert ev["page"] == 11 and ev["score"] == 85
+    assert [a["page"] for a in ev["also"]] == [52, 60]
+    assert ev["also"][0]["reason"] == "renewables at 31%"
+
+
+def test_evidence_of_a_capped_kpi_leads_with_the_poor_page():
+    """The score came from the poor page, so that is the reason; the good pages follow,
+    which is what explains a 20 sitting under a list of ten pages."""
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (15, 57, "missed the interim target")),
+                           capped=True)
+    assert (ev["page"], ev["score"]) == (57, 15)
+    assert ev["also"] == [{"page": 11, "score": 85, "reason": "down 22%"}]
+
+
+def test_evidence_keeps_at_most_two_supporting_pages():
+    ev = scoring._evidence(_entries(*[(90 - i, i, f"reason {i}") for i in range(1, 8)]), capped=False)
+    assert len(ev["also"]) == scoring.EVIDENCE_ALSO == 2
+
+
+def test_evidence_skips_pages_the_answer_gave_no_reason_for():
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (61, 52, ""), (40, 60, "policy only")),
+                           capped=False)
+    assert [a["page"] for a in ev["also"]] == [60]
+
+
+def test_a_kpi_that_scored_nowhere_has_no_evidence():
+    assert scoring._evidence(_entries((0, 3, "only mentioned")), capped=False) == {}
+
+
+def test_category_detail_carries_the_evidence_onto_the_kpi_row():
+    detail = scoring.category_detail(
+        [(11, {"Water withdrawn": 85}, {"Water withdrawn": "down 22%"}),
+         (52, {"Water withdrawn": 61}, {"Water withdrawn": "recycling at 31%"})],
+        ["Water withdrawn"],
+    )
+    ev = detail["kpis"][0]["evidence"]
+    assert ev["reason"] == "down 22%" and ev["also"][0]["page"] == 52
