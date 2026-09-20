@@ -333,16 +333,29 @@ def category_detail(pages: list, kpis: list[str]) -> dict:
     return {"method": METHOD, "score": category_score(final), "kpis": rows}
 
 
+# How many other scored pages a KPI keeps a reason for, beside the one that set its
+# score. Enough to explain a score built from several pages without the stored report
+# carrying a paragraph per KPI.
+EVIDENCE_ALSO = 2
+
+
 def _evidence(entries: list, capped: bool) -> dict:
-    """{page, reason} of the page a KPI's final score came from: the worst page when the
-    score was capped, else the best. {} when the answer gave no reason for it."""
+    """Why a KPI scored what it scored. {page, reason, score} of the page the final score
+    came from -- the worst page when it was capped, else the best -- plus `also`: the other
+    pages that scored it, best first, so a score drawn from several pages can be explained
+    by all of them and not just one (user, 2026-09-20). {} when the answer gave no reason."""
     scored = [e for e in entries if e[0] > 0]
     if not scored:
         return {}
     score, page, reason = min(scored) if capped else max(scored)
     if not reason:
         return {}
-    return {"page": page, "reason": reason, "score": score}
+    ev = {"page": page, "reason": reason, "score": score}
+    also = [e for e in sorted(scored, key=lambda e: e[0], reverse=True)
+            if (e[0], e[1]) != (score, page) and e[2]]
+    if also:
+        ev["also"] = [{"page": p, "score": sc, "reason": r} for sc, p, r in also[:EVIDENCE_ALSO]]
+    return ev
 
 
 def kpi_row(kpi: str, score: float, pages: list, capped: bool = False, evidence: dict | None = None) -> dict:

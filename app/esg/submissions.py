@@ -22,7 +22,9 @@ EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 # type are ignored before matching.
 MOBILE_RE = re.compile(r"^\+?\d{7,15}$")
 PHONE_SEPARATORS_RE = re.compile(r"[\s\-().]")
-REPORT_YEAR_RE = re.compile(r"^\d{4}-\d{4}$")
+# A financial year ("2024-2025") or a single reporting year ("2025"), for companies
+# whose reporting period is one calendar year (user, 2026-09-20).
+REPORT_YEAR_RE = re.compile(r"^\d{4}(?:-\d{4})?$")
 
 REQUIRED_FIELDS = ("name", "email", "designation", "company_name", "mobile_number", "report_year")
 
@@ -46,7 +48,7 @@ def validate_esg_fields(form: dict) -> dict:
     if not MOBILE_RE.match(PHONE_SEPARATORS_RE.sub("", form["mobile_number"].strip())):
         raise UserError("Please enter a valid phone number")
     if not REPORT_YEAR_RE.match(form["report_year"].strip()):
-        raise UserError("Report financial year must look like 2024-2025")
+        raise UserError("Report financial year must look like 2024-2025 or 2025")
     return form
 
 
@@ -129,7 +131,15 @@ def run_esg_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
         }, "$unset": {"report_edits": "", "report_original": ""}},
         projection={"report_edits": 1},
     )
-    delete_logo_file(((before or {}).get("report_edits") or {}).get("logo"))
+    edits_before = (before or {}).get("report_edits") or {}
+    for slot in ("logo", "corner_logo"):
+        delete_logo_file(edits_before.get(slot))
+
+    # The rating narrative is written now, from the scores just stored, so the detailed
+    # report and the Word summary open with it ready (user, 2026-09-20). Imported inside
+    # the function: app.reports.summary reaches into both calculators.
+    from app.reports.summary import write_narrative
+    write_narrative("esg", esg_submissions_collection().find_one({"_id": sub_id}) or {})
 
 
 def serialize_doc(obj):

@@ -169,6 +169,14 @@ def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
         }, "$unset": {"report_edits": "", "report_original": ""}},
         projection={"report_edits": 1},
     )
-    delete_logo_file(((before or {}).get("report_edits") or {}).get("logo"))
+    edits_before = (before or {}).get("report_edits") or {}
+    for slot in ("logo", "corner_logo"):
+        delete_logo_file(edits_before.get(slot))
 
     store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"], pages=page_rows)
+
+    # The rating narrative is written now, from the scores just stored, so the detailed
+    # report and the Word summary open with it ready (user, 2026-09-20). Imported inside
+    # the function: app.reports.summary reaches into both calculators.
+    from app.reports.summary import write_narrative
+    write_narrative("bfsi", store.submissions_collection().find_one({"_id": sub_id}) or {})

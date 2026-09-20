@@ -12,6 +12,17 @@ from app.core.config import settings
 settings.session_secret = "test-session-secret-" + "x" * 44
 
 
+@pytest.fixture(autouse=True)
+def no_openai_keys(monkeypatch):
+    """No test ever reaches the real OpenAI API. Every AI call in the app is faked by the
+    test that needs it, but `settings` reads the developer's own .env, so a path nobody
+    thought to patch would quietly dial out with a real key (and hang on retries). With
+    the keys blank, code that checks for one skips; code that does not still meets a fake.
+    A test that wants the check to pass sets its own key."""
+    monkeypatch.setattr(settings, "esg_openai_api_key", "")
+    monkeypatch.setattr(settings, "bfsi_openai_api_key", "")
+
+
 @pytest.fixture
 def db():
     database = mongomock.MongoClient()["esg_score_calculator"]

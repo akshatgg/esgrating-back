@@ -93,6 +93,9 @@ class FakeBfsiClient:
 def fake_bfsi(monkeypatch):
     c = FakeBfsiClient()
     monkeypatch.setattr(pipeline, "get_client", lambda: c)
+    # The rating narrative asks through the module (app/reports/summary.py), so the
+    # fake has to stand in there too -- never a real OpenAI call in a test.
+    monkeypatch.setattr("app.bfsi.openai_client.get_client", lambda: c)
     return c
 
 

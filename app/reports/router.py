@@ -92,25 +92,42 @@ def _drop_empty_edits(col, doc: dict) -> None:
     """Remove a report_edits left with neither content nor a logo (only bookkeeping).
     Conditional in the filter, so a concurrent logo upload or content save is kept."""
     col.update_one(
-        {"_id": doc["_id"], "report_edits.logo": {"$in": [None]},
+        {"_id": doc["_id"],
+         **{f"report_edits.{f}": {"$in": [None]} for f in LOGO_SLOTS.values()},
          **{f"report_edits.{k}": {"$exists": False} for k in _CONTENT_KEYS}},
         {"$unset": {"report_edits": ""}},
     )
 
 
-def _logo_name(doc: dict) -> str | None:
-    return (doc.get("report_edits") or {}).get("logo")
+# The sheet's two logos: the report's own, and the optional one in the top-right
+# corner where the SEBI line sits (user, 2026-09-20). One file each, same storage.
+LOGO_SLOTS = {"main": "logo", "corner": "corner_logo"}
 
 
-def _logo_url(kind: str, doc: dict) -> str | None:
-    return f"/api/admin/{kind}/submissions/{doc['_id']}/report/logo" if _logo_name(doc) else None
+def _logo_field(slot: str) -> str:
+    field = LOGO_SLOTS.get(slot)
+    if field is None:
+        raise HTTPException(422, f"Unknown logo slot {slot!r}.")
+    return field
+
+
+def _logo_name(doc: dict, slot: str = "main") -> str | None:
+    return (doc.get("report_edits") or {}).get(_logo_field(slot))
+
+
+def _logo_url(kind: str, doc: dict, slot: str = "main") -> str | None:
+    if not _logo_name(doc, slot):
+        return None
+    base = f"/api/admin/{kind}/submissions/{doc['_id']}/report/logo"
+    return base if slot == "main" else f"{base}?slot={slot}"
 
 
 def _report(kind: str, doc: dict) -> dict:
     ctx = editing.load_context(kind, doc)
     edits = editing.stored_edits(doc)
-    result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc))
-    original = editing.compute(kind, doc, ctx, editing.empty_edits(), None)["effective"]
+    result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc),
+                             _logo_url(kind, doc, "corner"))
+    original = editing.compute(kind, doc, ctx, editing.empty_edits(), None, None)["effective"]
     return serialize_doc({
         "effective": result["effective"],
         "original": original,
@@ -122,6 +139,9 @@ def _report(kind: str, doc: dict) -> dict:
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
+        # The rating narrative written when the report was analysed (app/reports/summary.py):
+        # the detailed report's Rating Summary and Key Rating Drivers are this text.
+        "narrative": (doc.get("summary_ai") or {}).get("text"),
     })
 
 
@@ -138,7 +158,8 @@ def preview_report(kind: str, id: str, payload: dict = Depends(edits_body),
     _col, doc = _load(kind, id)
     ctx = editing.load_context(kind, doc)
     edits = editing.normalize_edits(kind, payload, ctx)
-    result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc))
+    result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc),
+                             _logo_url(kind, doc, "corner"))
     return serialize_doc({
         "effective": result["effective"],
         "pages": result["pages"],
@@ -185,7 +206,8 @@ def reset_edits(kind: str, id: str, admin: str = Depends(require_admin)):
         update["$set"].update(restore["$set"])
         update["$unset"].update(restore["$unset"])
     _apply(col, doc, update)
-    delete_logo_file(_logo_name(doc))
+    for slot in LOGO_SLOTS:
+        delete_logo_file(_logo_name(doc, slot))
     return _report(kind, _reload(col, doc))
 
 
@@ -202,30 +224,32 @@ def download_summary(kind: str, id: str, admin: str = Depends(require_admin)):
 
 
 @router.post("/{kind}/submissions/{id}/report/logo")
-async def upload_logo(kind: str, id: str, logo: UploadFile = File(...), admin: str = Depends(require_admin)):
+async def upload_logo(kind: str, id: str, logo: UploadFile = File(...), slot: str = "main",
+                      admin: str = Depends(require_admin)):
     col, doc = _load(kind, id)
+    field = _logo_field(slot)
     _not_running(doc)
     data = await read_limited(logo, MAX_LOGO_BYTES, "The logo must be 1 MB or smaller.")
     name = save_logo(data)  # magic-byte checked: PNG / JPEG / WebP only
     try:
         _apply(col, doc, {"$set": {
-            "report_edits.logo": name,
+            f"report_edits.{field}": name,
             "report_edits.updated_at": datetime.now(timezone.utc),
             "report_edits.updated_by": admin,
         }})
     except HTTPException:
         delete_logo_file(name)  # an analysis claimed the submission meanwhile
         raise
-    old = _logo_name(doc)
+    old = _logo_name(doc, slot)
     if old and old != name:
         delete_logo_file(old)
     return _report(kind, _reload(col, doc))
 
 
 @router.get("/{kind}/submissions/{id}/report/logo")
-def get_logo(kind: str, id: str, admin: str = Depends(require_admin)):
+def get_logo(kind: str, id: str, slot: str = "main", admin: str = Depends(require_admin)):
     _col, doc = _load(kind, id)
-    name = _logo_name(doc)
+    name = _logo_name(doc, slot)
     if not name:
         raise HTTPException(404, "Not found")
     try:
@@ -240,14 +264,16 @@ def get_logo(kind: str, id: str, admin: str = Depends(require_admin)):
 
 
 @router.delete("/{kind}/submissions/{id}/report/logo")
-def remove_logo(kind: str, id: str, admin: str = Depends(require_admin)):
-    """Back to the default logo. (Not in the spec's table: the "use default logo" control
-    needs it, and PUT deliberately never touches the logo.)"""
+def remove_logo(kind: str, id: str, slot: str = "main", admin: str = Depends(require_admin)):
+    """Back to the default logo -- for the corner slot, to no logo at all. (Not in the
+    spec's table: the "use default logo" control needs it, and PUT deliberately never
+    touches the logo.)"""
     col, doc = _load(kind, id)
+    field = _logo_field(slot)
     _not_running(doc)
-    name = _logo_name(doc)
+    name = _logo_name(doc, slot)
     if name:
-        _apply(col, doc, {"$unset": {"report_edits.logo": ""}})
+        _apply(col, doc, {"$unset": {f"report_edits.{field}": ""}})
         _drop_empty_edits(col, doc)
         delete_logo_file(name)
     return _report(kind, _reload(col, doc))
