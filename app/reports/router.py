@@ -139,9 +139,11 @@ def _report(kind: str, doc: dict) -> dict:
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
-        # The rating narrative written when the report was analysed (app/reports/summary.py):
-        # the detailed report's Rating Summary and Key Rating Drivers are this text.
-        "narrative": (doc.get("summary_ai") or {}).get("text"),
+        # The rating narrative written when the report was analysed (app/reports/summary.py),
+        # with any analyst corrections laid over it -- the same text the Word summary uses,
+        # so the report on screen, its PDF and the .docx never disagree.
+        "narrative": summary.with_edits((doc.get("summary_ai") or {}).get("text") or {}, doc)
+        or None,
     })
 
 

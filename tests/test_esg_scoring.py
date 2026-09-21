@@ -159,3 +159,46 @@ def test_category_detail_carries_the_evidence_onto_the_kpi_row():
     )
     ev = detail["kpis"][0]["evidence"]
     assert ev["reason"] == "down 22%" and ev["also"][0]["page"] == 52
+
+
+# --- the answer's reason lines, however they arrive (production, 2026-09-21) ----------
+
+REASON_LINES = ["16 60: 24 average training hours per employee",
+                "123 70: Rs. 177.3 Bn local procurement spend, up 19%"]
+NUMBERED_KPIS = [f"KPI {i}" for i in range(1, 131)]
+
+
+def test_reason_lines_are_read_when_the_answer_returns_them_as_a_list():
+    """Production answers with a list of lines, not one string. Read as a string it was
+    dropped whole, which left every KPI in every report with no reason at all."""
+    out = scoring.kpi_reasons({"reason": REASON_LINES}, NUMBERED_KPIS)
+    assert out["KPI 16"] == "24 average training hours per employee"
+    assert out["KPI 123"] == "Rs. 177.3 Bn local procurement spend, up 19%"
+
+
+def test_reason_lines_are_still_read_as_one_string():
+    out = scoring.kpi_reasons({"reason": "\n".join(REASON_LINES)}, NUMBERED_KPIS)
+    assert out["KPI 16"] == "24 average training hours per employee"
+
+
+def test_a_list_of_reasons_joins_into_readable_text():
+    """The page-scores export printed str(list) -- the raw Python literal -- as the page's
+    reason. It gets the lines instead."""
+    text = scoring.reason_text({"reason": REASON_LINES})
+    assert text == "\n".join(REASON_LINES)
+    assert "[" not in text and "'" not in text
+
+
+@pytest.mark.parametrize("value", [None, 42, {"a": 1}, [], ["", "  "]])
+def test_no_reason_is_no_reason(value):
+    assert scoring.reason_text({"reason": value}) == ""
+    assert scoring.kpi_reasons({"reason": value}, NUMBERED_KPIS) == {}
+
+
+def test_a_listed_reason_reaches_the_kpi_row_as_evidence():
+    """End to end: the shape production returns now lands in the report's Reason column."""
+    detail = scoring.category_detail(
+        [(12, {"KPI 16": 60}, scoring.kpi_reasons({"reason": REASON_LINES}, NUMBERED_KPIS))], NUMBERED_KPIS)
+    row = next(r for r in detail["kpis"] if r["kpi"] == "KPI 16")
+    assert row["evidence"]["reason"] == "24 average training hours per employee"
+    assert row["evidence"]["page"] == 12

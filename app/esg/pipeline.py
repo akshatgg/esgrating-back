@@ -354,7 +354,9 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                         "score": scoring.page_score(page_kpis),
                         "kpis": len(page_kpis),
                         "kpi_names": scoring.kpi_labels(page_kpis, kpis),
-                        "reason": str(parsed.get("reason") or ""),
+                        # Joined, never str(list): the answer may return its lines as a
+                        # list, and the page-scores export showed the raw Python literal.
+                        "reason": scoring.reason_text(parsed),
                         # Set when the answer's negative keywords disagree with its scores.
                         "review": scoring.contradiction(parsed, page_kpis),
                     }

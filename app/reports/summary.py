@@ -272,6 +272,12 @@ NARRATIVE_SYSTEM = (
     "list KPI names one after another, and never repeat a driver already covered.\n"
     "A weakness says what the report does not evidence or evidences weakly, why that matters "
     "for the rating, and what disclosure would raise it -- drawn only from the gaps supplied.\n"
+    "'rating_rationale' is the report's Scoring Rationale, read by anyone who asks how the "
+    "scores were arrived at: TWO OR THREE paragraphs, 200 to 320 words in total, separated by "
+    "a blank line. Take each pillar in turn -- what its evidence showed, which KPIs carried the "
+    "score and which were missing, and how that produced the pillar's number -- then close with "
+    "how the three weigh together into the overall score and its grade. Continuous prose, no "
+    "page-by-page listing and no bare KPI names.\n"
     "'favourable_factors' and 'constraints' are the two halves of the rating rationale, each "
     "one paragraph of 70 to 120 words: what the score favourably factors in, and what it is "
     "constrained by. Together they must explain the grade to a reader who sees nothing else.\n"
@@ -299,13 +305,35 @@ NARRATIVE_SYSTEM = (
     '"strengths": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
     '"weaknesses": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
     '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
-    '"rating_rationale": "<3-4 sentences linking drivers to the final score>", '
+    '"rating_rationale": "<2-3 paragraphs, blank line between them>", '
     '"rating_interpretation": "<2 sentences on how to read this grade>"}'
 )
 
+# The drivers are asked for separately (production, 2026-09-21). Asked for together with
+# the pillar assessments, the model returned valid JSON with the pillars written and
+# strengths, weaknesses, priorities and the rationale simply absent -- about 2,500 words
+# in one object was more than it would produce. Two calls, each a manageable answer.
+DRIVERS_SYSTEM = (
+    # Everything up to the pillar instruction: the same rules and the same definition of
+    # a driver, without the pillar-assessment brief this call is not answering.
+    NARRATIVE_SYSTEM.split("Each entry of 'pillar_narratives'")[0]
+    + "Plain professional English, short sentences. Respond in JSON with exactly these "
+    "fields and no others: "
+    '{"strengths": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
+    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
+    '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
+    '"rating_rationale": "<2-3 paragraphs, blank line between them>", '
+    '"rating_interpretation": "<2 sentences on how to read this grade>"}'
+)
+
+# Fields each call must come back with. An answer missing them is not stored: a
+# half-written narrative cached once would be served for the life of the report.
+NARRATIVE_REQUIRED = ("executive_summary", "favourable_factors", "constraints", "pillar_narratives")
+DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
+
 # Bumped whenever the shape above changes: the fingerprint is over the rating data, so
 # without it a report cached under the old shape would keep serving the old text.
-NARRATIVE_VERSION = 3
+NARRATIVE_VERSION = 5
 
 
 def _kpi_evidence(r: dict) -> str:
@@ -363,6 +391,16 @@ def _collection(kind: str):
     return esg_submissions_collection() if kind == "esg" else bfsi_store.submissions_collection()
 
 
+def _require(answer, fields: tuple, what: str) -> None:
+    """An answer that left fields out is a failure, not a result: cached once, an
+    incomplete narrative would be served for the life of the report."""
+    if not isinstance(answer, dict):
+        raise ValueError(f"{what}: answer was not an object")
+    missing = [f for f in fields if not answer.get(f)]
+    if missing:
+        raise ValueError(f"{what}: answer left out {', '.join(missing)}")
+
+
 def narrative(kind: str, doc: dict, facts: dict) -> dict:
     payload = _narrative_input(facts)
     user = "Rating data (JSON):\n" + json.dumps(payload, ensure_ascii=False)
@@ -372,8 +410,10 @@ def narrative(kind: str, doc: dict, facts: dict) -> dict:
         return cached["text"]
     try:
         text = _ask_ai(kind, NARRATIVE_SYSTEM, user)
-        if not isinstance(text, dict) or not text.get("executive_summary"):
-            raise ValueError("incomplete answer")
+        _require(text, NARRATIVE_REQUIRED, "rating summary")
+        drivers_text = _ask_ai(kind, DRIVERS_SYSTEM, user)
+        _require(drivers_text, DRIVERS_REQUIRED, "rating drivers")
+        text = {**text, **drivers_text}
     except Exception as e:
         logger.error("rating summary narrative failed: %s", e)
         raise HTTPException(502, "Couldn't write the rating summary text right now. Try again in a minute.")
@@ -622,9 +662,32 @@ def available(kind: str, doc: dict) -> bool:
     return isinstance(coverage, dict) and any((coverage.get(n) or {}).get("kpis") for _, n in PILLARS)
 
 
+# The written rating an analyst can correct in the report (app/reports/editing.py
+# FIELD_SPECS). Their text wins over the AI's wherever they have written one.
+NARRATIVE_EDIT_KEYS = ("executive_summary", "favourable_factors", "constraints",
+                       "rating_rationale", "pillar_narratives", "strengths", "weaknesses")
+
+
+def with_edits(text: dict, doc: dict) -> dict:
+    """The narrative as the analyst left it. A correction made in the report has to reach
+    the Word summary too, or the two documents say different things about the same rating."""
+    fields = (doc.get("report_edits") or {}).get("fields") or {}
+    out = dict(text or {})
+    for key in NARRATIVE_EDIT_KEYS:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key == "pillar_narratives" and isinstance(value, dict):
+            # Per pillar: a correction to one leaves the other two as written.
+            out[key] = {**(out.get(key) or {}), **value}
+        else:
+            out[key] = value
+    return out
+
+
 def build_summary(kind: str, doc: dict) -> bytes:
     facts = build_facts(kind, doc)
-    return render(facts, narrative(kind, doc, facts))
+    return render(facts, with_edits(narrative(kind, doc, facts), doc))
 
 
 def filename(kind: str, doc: dict) -> str:

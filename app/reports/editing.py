@@ -57,7 +57,11 @@ def _unique(items):
 HEADING_KEYS = {
     "bfsi": _unique(_DETAILED_HEADINGS + _BFSI_ONEPAGER_HEADINGS),
     # ESG renders the sheet, plus the page-scores panel and the score scale.
-    "esg": _unique(_SHEET_HEADINGS + ["report_title", "scoring_rationale", "score_scale"]),
+    # ESG renders the sheet, the detailed report and the score scale.
+    "esg": _unique(_SHEET_HEADINGS + [
+        "report_title", "scoring_rationale", "score_scale",
+        "marks_by_pillar", "key_rating_drivers", "strengths_heading", "weaknesses_heading",
+    ]),
 }
 
 _SHORT, _LONG, _LIST, _CATLISTS, _REASONS = "short", "long", "list", "catlists", "reasons"
@@ -65,6 +69,9 @@ _SHORT, _LONG, _LIST, _CATLISTS, _REASONS = "short", "long", "list", "catlists",
 # to show NOTHING: blank text is 'no override' everywhere here (see normalize_edits),
 # so text alone could never hide anything (user, 2026-09-20).
 _CHOICE = "choice"
+# The written rating, so an analyst can correct what the AI wrote: a paragraph block per
+# pillar, and the drivers as a list of {headline, detail} (user, 2026-09-21).
+_CATTEXT, _DRIVERS = "cattext", "drivers"
 CHOICES = {"header_slot": ("text", "logo", "none")}
 
 FIELD_SPECS = {
@@ -76,6 +83,10 @@ FIELD_SPECS = {
         # The sheet's top-right corner (its text, an uploaded logo, or nothing) and
         # the optional line along the bottom.
         "header_slot": _CHOICE, "footer_note": _LONG,
+        # The written rating (app/reports/summary.py), correctable in the report.
+        "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
+        "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
+        "strengths": _DRIVERS, "weaknesses": _DRIVERS,
     },
     "bfsi": {
         "company": _SHORT, "sector": _SHORT, "industry": _SHORT, "fy": _SHORT, "report_date": _SHORT,
@@ -86,6 +97,10 @@ FIELD_SPECS = {
         # The sheet's top-right corner (its text, an uploaded logo, or nothing) and
         # the optional line along the bottom.
         "header_slot": _CHOICE, "footer_note": _LONG,
+        # The written rating (app/reports/summary.py), correctable in the report.
+        "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
+        "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
+        "strengths": _DRIVERS, "weaknesses": _DRIVERS,
     },
 }
 FIELD_KEYS = {kind: list(spec) for kind, spec in FIELD_SPECS.items()}
@@ -240,6 +255,32 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                     cats[cat] = items
             if cats:
                 out["fields"][key] = cats
+        elif spec == _CATTEXT:
+            cats = {}
+            for cat, block in _as_dict(value, f"Field {key!r}").items():
+                cat = _cat(cat, f"Field {key!r}")
+                block = _text(block, f"Field {key}.{cat}", LONG_MAX, multiline=True)
+                if block != "":
+                    cats[cat] = block
+            if cats:
+                out["fields"][key] = cats
+        elif spec == _DRIVERS:
+            if not isinstance(value, list):
+                raise UserError(f"Field {key!r} must be a list.")
+            if len(value) > LIST_MAX:
+                raise UserError(f"Field {key!r} can have at most {LIST_MAX} items.")
+            items = []
+            for item in value:
+                item = _as_dict(item, f"Field {key!r} item")
+                unknown = set(item) - {"headline", "detail"}
+                if unknown:
+                    raise UserError(f"Field {key!r} item: unknown key {sorted(unknown)[0]!r}.")
+                headline = _text(item.get("headline") or "", f"Field {key!r} headline", SHORT_MAX)
+                detail = _text(item.get("detail") or "", f"Field {key!r} detail", LONG_MAX, multiline=True)
+                if headline or detail:
+                    items.append({"headline": headline, "detail": detail})
+            if items:
+                out["fields"][key] = items
         elif spec == _REASONS:
             cats = {}
             for cat, texts in _as_dict(value, "Field 'reasons'").items():

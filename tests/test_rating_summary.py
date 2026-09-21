@@ -25,6 +25,8 @@ SCORES = {"Water related targets": 40, "Water withdrawn": 90, "Injury rate": 70,
 
 TEXT = {
     "executive_summary": "Acme shows strong water data but thin waste disclosure.",
+    "favourable_factors": "Measured water performance across the pillar.",
+    "constraints": "No waste policy evidenced anywhere in the report.",
     "key_rating_drivers": "Water withdrawn and anti-bribery policy", "disclosure_headline": "Evidence is partial",
     "pillar_narratives": {"E": "E story", "S": "S story", "G": "G story"},
     "strengths": ["Water withdrawn (90)", "Anti-bribery/corruption policy (85)"],
@@ -117,12 +119,13 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     assert "1 | Environment - Waste | No waste policy | Waste is 0 | Publish the waste policy" in text
     assert "35% Environment + 30% Social + 35% Governance" in text
 
-    # The AI text is cached until the scores change.
-    admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
-    assert len(fake_ai) == 1
-    db.esg_submissions.update_one({"_id": sid}, {"$set": {"final.environmental_score": 50}})
+    # The AI text is cached until the scores change. Writing it takes two calls: the
+    # summary and pillar assessments, then the drivers.
     admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
     assert len(fake_ai) == 2
+    db.esg_submissions.update_one({"_id": sid}, {"$set": {"final.environmental_score": 50}})
+    admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
+    assert len(fake_ai) == 4
 
 
 def test_bfsi_summary_uses_cin_loan_type_and_weights(admin_client, db, fake_ai):

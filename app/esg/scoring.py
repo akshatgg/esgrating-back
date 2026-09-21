@@ -232,6 +232,19 @@ def page_score(scores: dict[str, float]) -> float:
 _REASON_LINE = re.compile(r"(?m)^\W*(\d+)\s*[ ,\-]?\s*(\d+(?:\.\d+)?)?\s*[:\-]\s*(\S.*?)\s*$")
 
 
+def reason_text(parsed) -> str:
+    """The answer's reason as one block of text. The scoring call returns its per-KPI
+    lines either as a single string with one line each, or as a list of those lines --
+    both say the same thing, and production answers with the list (2026-09-21). Anything
+    else is no reason at all."""
+    if not isinstance(parsed, dict):
+        return ""
+    value = parsed.get("reason")
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(v).strip() for v in value if str(v).strip())
+    return value.strip() if isinstance(value, str) else ""
+
+
 def kpi_reasons(parsed, kpis: list[str]) -> dict[str, str]:
     """{KPI name: why it scored what it scored} from one page's answer. The scoring call
     writes one line per KPI it scored (SCORE_GUIDE), so the evidence for a score travels
@@ -239,10 +252,8 @@ def kpi_reasons(parsed, kpis: list[str]) -> dict[str, str]:
 
     An answer whose "reason" is one block of prose about the whole page gives {}: there is
     no way to tell which KPI it belongs to, so nothing is attributed to any of them."""
-    if not isinstance(parsed, dict):
-        return {}
-    text = parsed.get("reason")
-    if not isinstance(text, str):
+    text = reason_text(parsed)
+    if not text:
         return {}
     out = {}
     for number, _score, line in _REASON_LINE.findall(text):
