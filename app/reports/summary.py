@@ -221,7 +221,9 @@ def build_facts(kind: str, doc: dict) -> dict:
     grade, label = _grade(overall)
     return {
         "kind": kind, "company": company, "identifier": identifier, "sector": sector, "period": period,
-        "assessed": _date(assessed), "status": "Final (analyst-edited)" if doc.get("report_edits") else "Final",
+        # Always "Final": whether an analyst revised a score is internal to the rating,
+        # not something the delivered document announces (user, 2026-09-21).
+        "assessed": _date(assessed), "status": "Final",
         "overall": overall, "grade": grade, "label": label, "weights": weights_text, "movement": movement,
         "pillars": pillars, "kpi_rows": kpi_rows,
         "completeness": {"pct": completeness, "found": found, "total": total,
@@ -240,22 +242,31 @@ def _band(pct: float, high: float, moderate: float) -> str:
 
 NARRATIVE_SYSTEM = (
     "You are an ESG rating analyst writing the text of an ESG Rating Summary.\n"
-    "Use ONLY the scores, KPIs, themes and evidence supplied below. A KPI may be named in the "
-    "text only if it appears in that data; every strength, weakness and priority must be "
-    "traceable to a KPI, theme or pillar score that is in it. If no supplied KPI supports a "
-    "statement, do not make the statement.\n"
-    "Bring in nothing from your own knowledge of ESG. Do not name a standard, framework, "
-    "guideline, certification, policy, target, metric, incident or commitment that is not in the "
-    "data, and do not assume a company has one because its sector normally would. Do not invent "
-    "figures.\n"
-    "Read what the evidence actually shows and keep its direction. A policy is not performance, "
-    "an intention or a future target is not an achievement, and a programme is not an outcome: "
-    "never describe any of them as a result. A low score means the evidence was weak or the "
-    "performance poor -- never present it as a strength. Never change, reinterpret or round the "
-    "scores you are given.\n"
-    "A missing KPI means this report does not evidence it, not that the company does not do it. "
-    "Write gaps as 'No disclosure on ...', 'Limited disclosure on ...' or 'The report does not "
-    "provide evidence of ...'. Do not write 'The company does not ...' unless the data says so.\n"
+    "Use ONLY the validated KPI results supplied below -- the scores, KPIs, themes and evidence "
+    "the KPI validation and scoring engine produced. Do NOT independently search for, infer, "
+    "invent or introduce additional KPIs. A KPI may be used only if it was evidenced in that "
+    "data and carries its supporting evidence; every strength, weakness and priority must be "
+    "directly traceable to a validated KPI, theme or pillar score. If no validated KPI supports "
+    "a statement, do not make the statement.\n"
+    "Bring in nothing from your own knowledge of ESG. Do not introduce standards, frameworks, "
+    "guidelines, certifications, policies, targets, metrics, incidents, commitments or practices "
+    "that are not in the data, and do not infer that a company has one merely because its sector "
+    "normally would. Do not invent figures. Do not use other reports, other companies or "
+    "anything outside the data supplied.\n"
+    "EVIDENCE PRINCIPLE. Do not treat keyword presence as positive evidence. Do not treat a "
+    "general statement as proof that a KPI is met. Do not treat a policy or commitment as proof "
+    "of performance. Do not treat an intention or a future target as evidence that it has been "
+    "achieved. Do not treat an initiative as proof of a positive outcome. Read what the evidence "
+    "actually shows and keep its direction: if the evidence says emissions rose despite a "
+    "reduction programme, that is not positive emissions performance. A low score means the "
+    "evidence was weak or the performance poor -- never present it as a strength.\n"
+    "The text must reflect the score and the direction the scoring engine recorded for each KPI. "
+    "Never change, reinterpret, round or override a validated score.\n"
+    "A missing KPI means the source report does not provide validated evidence for it. It does "
+    "NOT mean the company does not perform the activity. Write gaps as 'No disclosure on ...', "
+    "'Limited disclosure on ...', 'The report does not provide evidence of ...' or 'The report "
+    "provides limited evidence on ...'. Do not write 'The company does not ...' unless the data "
+    "explicitly and directly says so.\n"
     "Build the text from what this report evidenced -- the KPIs found, their scores, their "
     "evidence and their themes -- and name missing KPIs only as absent disclosure, in the order "
     "given. Priorities must stay inside the themes this report already covers; never recommend "
@@ -333,7 +344,7 @@ DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
 
 # Bumped whenever the shape above changes: the fingerprint is over the rating data, so
 # without it a report cached under the old shape would keep serving the old text.
-NARRATIVE_VERSION = 5
+NARRATIVE_VERSION = 6
 
 
 def _kpi_evidence(r: dict) -> str:
@@ -401,10 +412,36 @@ def _require(answer, fields: tuple, what: str) -> None:
         raise ValueError(f"{what}: answer left out {', '.join(missing)}")
 
 
+def _user_payload(facts: dict) -> str:
+    return "Rating data (JSON):\n" + json.dumps(_narrative_input(facts), ensure_ascii=False)
+
+
+def _fingerprint(user: str) -> str:
+    """Identifies the rating the text was written for. It covers the schema version as
+    well as the data, so text written to an older brief is never reused."""
+    return hashlib.sha256(f"v{NARRATIVE_VERSION}\n{user}".encode()).hexdigest()
+
+
+def fresh_narrative(kind: str, doc: dict) -> dict | None:
+    """The stored narrative, but only while it still describes the scores this report
+    carries now. Saving an edited pillar score rewrites `final` (app/reports/editing.py),
+    which changes the fingerprint -- and prose written for the old numbers sitting beside
+    the new ones is how a report ends up calling Environment its strongest pillar after
+    the analyst moved Social above it (user, 2026-09-21)."""
+    cached = doc.get("summary_ai") or {}
+    text = cached.get("text")
+    if not isinstance(text, dict) or not text:
+        return None
+    try:
+        current = _fingerprint(_user_payload(build_facts(kind, doc)))
+    except Exception:
+        return None  # nothing to compare against: treat it as out of date
+    return text if cached.get("fingerprint") == current else None
+
+
 def narrative(kind: str, doc: dict, facts: dict) -> dict:
-    payload = _narrative_input(facts)
-    user = "Rating data (JSON):\n" + json.dumps(payload, ensure_ascii=False)
-    fingerprint = hashlib.sha256(f"v{NARRATIVE_VERSION}\n{user}".encode()).hexdigest()
+    user = _user_payload(facts)
+    fingerprint = _fingerprint(user)
     cached = doc.get("summary_ai") or {}
     if cached.get("fingerprint") == fingerprint and isinstance(cached.get("text"), dict):
         return cached["text"]
@@ -628,10 +665,6 @@ def render(facts: dict, text: dict) -> bytes:
         values[f"{code}_GAPS"] = "; ".join(r["kpi"] for r in p[code]["gaps"][:3]) or "No KPI gaps"
     _replace_all(d, values)
     # Scorecard: a pillar set by an analyst says so, with the KPI total beside it.
-    for row, code in zip(list(scorecard.rows)[1:4], "ESG"):
-        if p[code]["manual"]:
-            _set_paragraph(row.cells[3].paragraphs[0],
-                           f"{p[code]['label']} (set by analyst; KPI total {_fmt(p[code]['kpi_total'])})")
 
     out = io.BytesIO()
     d.save(out)

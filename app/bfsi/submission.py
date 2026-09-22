@@ -175,8 +175,3 @@ def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
 
     store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"], pages=page_rows)
 
-    # The rating narrative is written now, from the scores just stored, so the detailed
-    # report and the Word summary open with it ready (user, 2026-09-20). Imported inside
-    # the function: app.reports.summary reaches into both calculators.
-    from app.reports.summary import write_narrative
-    write_narrative("bfsi", store.submissions_collection().find_one({"_id": sub_id}) or {})

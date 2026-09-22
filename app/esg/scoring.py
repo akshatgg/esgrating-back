@@ -44,29 +44,110 @@ MAX_SCORE = 100.0
 # delts is good or not whatever is written in the page" / "if only mention so still u have
 # to give 0").
 SCORE_GUIDE = (
+    # The client's KPI evidence-validation brief (manager, 2026-09-22), kept whole. Two
+    # sections are the pipeline's rather than his: the score bands (his 1-30 for a bare
+    # mention would pay for naming a KPI, and his scale has no band for poor performance,
+    # which capped_score() and contradiction() both read), and the response fields (the
+    # pipeline scores a page against a numbered list, and the one-pager's KPI chips are
+    # built from the keyword lists). Everything he requires per KPI -- evidence type,
+    # direction, why the score -- is required in the reason line instead of as separate
+    # JSON keys, so nothing is lost and the answer stays parseable.
+    "You are an ESG KPI evidence validation and scoring analyst. Evaluate each numbered "
+    "evaluation point ONLY against the text supplied below.\n"
+    "\n"
+    "You must NOT assume a point is evidenced merely because: the point's name or similar "
+    "words appear in the text; a related ESG concept is mentioned; a general policy or "
+    "commitment is mentioned; the company states an intention to act in future; the company "
+    "describes an activity without demonstrating what the point requires; the text contains "
+    "generic ESG language; or the text discusses the topic in a different context.\n"
+    "\n"
+    "For every point, first understand WHAT IT IS ACTUALLY MEASURING and what evidence is "
+    "required to support a positive score. Then read the relevant passage in context and "
+    "decide whether the disclosure actually satisfies that requirement.\n"
+    "\n"
+    "IMPORTANT: keyword matching is NEVER sufficient evidence. Semantic similarity is NEVER "
+    "sufficient evidence. Understand the meaning, context, direction and sentiment of the "
+    "disclosure before assigning a score. 'Today is a rainy day' is neither positive nor "
+    "negative on its own; the meaning depends on what is being evaluated.\n"
+    "\n"
+    "If the point is 'Emissions reduction target', none of these automatically earn a "
+    "positive score: 'The company shall establish emissions reduction targets.' / 'The "
+    "company is committed to emissions reduction targets.' / 'The company intends to reduce "
+    "emissions in the future.' They show a commitment or a policy. They do not show that "
+    "emissions were reduced or that a measurable target with progress exists.\n"
+    "\n"
+    "Distinguish carefully between: (1) Mention -- the topic is merely mentioned; (2) Policy "
+    "or Commitment -- a policy, intention, commitment or planned action; (3) Action or "
+    "Programme -- an actual initiative, programme or action; (4) Measured Performance -- "
+    "measured data, results, outcomes, targets, progress or quantified performance. Do not "
+    "upgrade a point from one category to another without evidence. 'We aim to reduce GHG "
+    "emissions by 30% by 2030' is a target, NOT evidence that emissions have already fallen "
+    "30%. 'GHG emissions decreased from 100,000 tCO2e to 80,000 tCO2e' is measured "
+    "reduction. The score must reflect what the disclosure actually demonstrates, not what "
+    "the company intends to achieve.\n"
+    "\n"
+    "NEGATIVE / LIMITATION CONTEXT: identify whether the passage is negative, neutral or "
+    "positive relative to what the point requires. 'Emissions increased by 12% during the "
+    "reporting period despite our reduction programme' must NOT earn a positive emissions "
+    "score merely because a reduction programme is mentioned. 'No progress was made against "
+    "the emissions reduction target' must not score highly merely because a target exists. "
+    "The requirement and the actual outcome must be weighed together.\n"
+    "\n"
+    "CONTEXT IS MANDATORY: read the complete relevant paragraph and, where needed, the "
+    "surrounding paragraphs, tables, footnotes and headings before scoring. Do not score "
+    "from an isolated sentence when the surrounding context changes its meaning.\n"
+    "\n"
+    "SOURCE GROUNDING: every point you score must be supported by what this text actually "
+    "says, and your reason for it must give the supporting evidence, which of the four "
+    "categories above it is, whether it is positive, neutral or negative, and why that "
+    "earns the score. Do NOT manufacture evidence. Do NOT infer evidence from general ESG "
+    "language. Do NOT use outside knowledge, other reports, other companies, websites or "
+    "anything you know beyond this text.\n"
+    "\n"
+    "CRITICAL ANTI-HALLUCINATION RULE: if this text does not contain evidence supporting a "
+    "point, that point must NOT be scored. If 'Palm oil sourcing policy' does not appear or "
+    "is not substantively addressed, it must not be treated as evidenced simply because it "
+    "exists in the KPI library. Likewise 'OECD Guidelines for MNEs' must not be scored "
+    "unless the text discloses it. The KPI library defines WHAT TO LOOK FOR. The text "
+    "determines WHETHER IT EXISTS.\n"
+    "\n"
+    "SCORING: do not give a high score merely because the text contains the point's "
+    "keyword. The score must reflect the strength and specificity of the actual evidence, "
+    "and how good the company's performance on that point is.\n"
     '- "kpi_scores": A list of [point number, score] pairs for the evaluation points listed '
-    'above that this text says something about. Score each from 0 to 100 on how GOOD the '
-    "company's performance on that point is, judged from what this text shows:\n"
-    '  0: you cannot judge the performance -- the point is only named, listed or mentioned, only '
-    'promised, planned or pending, or the text says too little to tell whether it is good\n'
-    '  1-20: poor -- fines, penalties, lawsuits, incidents, accidents, a worsening trend, or an '
-    'admitted failure\n'
-    '  21-40: weak -- something is being done, but it is early, partial or thin, with no result\n'
-    '  41-60: moderate -- real actions or programmes are in place, but no measured result\n'
-    '  61-80: good -- measured results, or real progress against a target\n'
-    '  81-100: strong -- targets met, a measured improvement, independent assurance or certification\n'
-    'Judge how good the performance is, never how much detail is written. Leave out the points '
-    'this text says nothing about, and use an empty list if it says nothing about any of them.\n'
-    '- "reason": One short line for each point you scored, in the form '
-    '"<point number> <score>: <what this text shows about that point>" -- for example '
-    '"18 85: Scope 1 and 2 emissions down 22 percent against a 2030 target". Nothing else: no '
-    'overall score and no overall verdict for the page.\n'
+    "above that this text genuinely evidences. Score each from 0 to 100:\n"
+    "  0: only named, listed or mentioned, only promised, planned or pending, or too little "
+    "to judge -- a point this text does not genuinely evidence scores 0\n"
+    "  1-20: poor -- fines, penalties, lawsuits, incidents, accidents, a worsening trend, or "
+    "an admitted failure\n"
+    "  21-40: a policy, commitment or stated intention, with little evidence of "
+    "implementation\n"
+    "  41-60: a real action, programme or initiative in place, but no measured result\n"
+    "  61-80: measured results, or real progress against a target\n"
+    "  81-100: targets met, a measured improvement, independent assurance or certification\n"
+    "These ranges are NOT automatic. A point requiring measured performance cannot reach "
+    "61-100 because a policy exists. A point requiring a policy cannot score highly because "
+    "the topic is mentioned. A negative outcome must not be treated as positive because the "
+    "company has a policy or programme addressing it. Judge how good the performance is, "
+    "never how much detail is written. Leave out the points this text says nothing about, "
+    "and use an empty list if it says nothing about any of them.\n"
+    '- "reason": One line for each point you scored, in the form '
+    '"<point number> <score>: <evidence, its category, its direction, and why it earns that '
+    'score>" -- for example "18 85: Scope 1 and 2 emissions down 22 percent against a 2030 '
+    'target; measured performance, positive, a measured improvement against a stated '
+    'target". Nothing else: no overall score and no overall verdict for the page.\n'
     '- "positive_keywords": The words or short phrases from this text that earned the higher '
-    'scores above -- the measured results, targets met, certifications or assurance you saw. '
-    'Quote the text, do not invent a phrase, and use an empty list if nothing earned a score.\n'
+    "scores above -- the measured results, targets met, certifications or assurance you saw. "
+    "Quote the text, do not invent a phrase, and use an empty list if nothing earned a "
+    "score.\n"
     '- "negative_keywords": The words or short phrases from this text that show poor '
-    'performance -- the fines, penalties, lawsuits, incidents, accidents or worsening numbers '
-    'behind any score of 1 to 20. Quote the text, and use an empty list if there are none.'
+    "performance -- the fines, penalties, lawsuits, incidents, accidents or worsening "
+    "numbers behind any score of 1 to 20. Quote the text, and use an empty list if there are "
+    "none.\n"
+    "\n"
+    "Never reward keyword presence alone. Never convert intention into achievement. Never "
+    "convert policy into performance. Never convert activity into outcome. Never convert "
+    "generic ESG language into point-specific evidence."
 )
 
 # The response fields SCORE_GUIDE replaces. The scoring prompt (esg_prompts for ESG,
@@ -480,9 +561,8 @@ def kpi_summary_rows(coverage, totals: dict, weights_label: str, overall, grade:
                 pages += f" (capped at {_num(CAP_SCORE)}: poor performance found)"
             rows.append([cat, r.get("kpi", ""), _num(kpi_best(r)), pages])
         total = float(totals.get(cat) or 0)
-        note = (f"Set by analyst (KPI total {_num(float(detail.get('score') or 0))})"
-                if detail.get("analyst_score") is not None else "")
-        rows.append([f"{cat} total", "", _num(total), note])
+        # No note about who set the score: the export is a client document too.
+        rows.append([f"{cat} total", "", _num(total), ""])
     rows.append(["Overall", weights_label, f"{float(overall or 0):.2f}", f"Grade {grade}"])
     return rows
 

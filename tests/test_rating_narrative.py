@@ -1,5 +1,7 @@
 # The rating narrative written when a report is analysed (app/reports/summary.py
 # write_narrative), and the drivers shape the detailed report renders -- user, 2026-09-20.
+import pathlib
+
 import pytest
 
 from app.core.config import settings
@@ -207,3 +209,67 @@ def test_driver_corrections_are_validated(admin_client, db):
     ok = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
                           json={"fields": {"strengths": [{"headline": "", "detail": ""}]}})
     assert ok.status_code == 200 and "strengths" not in ok.json()["edits"]["fields"]
+
+
+# --- the one-pager first, the other reports on request (user, 2026-09-21) -------------
+
+def test_analysing_writes_no_prose(admin_client, db, monkeypatch):
+    """An analysis produces the scores and the one-pager. The written rating costs two
+    calls and half a minute, and most submissions never open a report that uses it."""
+    import app.esg.submissions as subs
+    assert "write_narrative" not in pathlib.Path(subs.__file__).read_text()
+
+
+def test_generate_reports_writes_the_narrative(admin_client, db, ai):
+    sid = _esg(db)
+    assert admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["narrative"] is None
+
+    body = admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").json()
+    assert body["narrative"]["strengths"][0]["headline"] == "Measured water performance"
+    assert len(ai) == 2
+    assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
+
+
+def test_a_changed_score_makes_the_stored_text_stale(admin_client, db, ai):
+    """The complaint this exists for: raise one pillar above another and the prose written
+    for the old numbers must not still call the old pillar the strongest."""
+    sid = _esg(db)
+    admin_client.post(f"/api/admin/esg/submissions/{sid}/reports")
+    assert admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["narrative"]
+
+    admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
+                     json={"pillar_overrides": {"E": 95}})
+
+    body = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()
+    assert body["narrative"] is None
+    assert body["narrative_stale"] is True
+
+
+def test_regenerating_writes_it_for_the_edited_scores(admin_client, db, ai):
+    sid = _esg(db)
+    admin_client.post(f"/api/admin/esg/submissions/{sid}/reports")
+    admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
+                     json={"pillar_overrides": {"E": 95}})
+
+    body = admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").json()
+    assert body["narrative"] is not None and body["narrative_stale"] is False
+    # The writer was given the edited score, not the one the analysis produced.
+    assert '"score": 95' in ai[-1][2]
+
+
+def test_a_report_with_no_prose_yet_is_not_called_stale(admin_client, db):
+    sid = _esg(db)
+    body = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()
+    assert body["narrative"] is None and body["narrative_stale"] is False
+
+
+def test_generate_reports_needs_a_kpi_scored_report(admin_client, db, ai):
+    sid = db.esg_submissions.insert_one({"company_name": "Acme", "final": {"composite_score": 50.0}}).inserted_id
+    assert admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").status_code == 409
+    assert not ai
+
+
+def test_generate_reports_without_an_ai_key_is_503(admin_client, db, monkeypatch):
+    monkeypatch.setattr(settings, "esg_openai_api_key", "")
+    sid = _esg(db)
+    assert admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").status_code == 503

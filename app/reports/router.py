@@ -123,6 +123,7 @@ def _logo_url(kind: str, doc: dict, slot: str = "main") -> str | None:
 
 
 def _report(kind: str, doc: dict) -> dict:
+    written = summary.fresh_narrative(kind, doc)
     ctx = editing.load_context(kind, doc)
     edits = editing.stored_edits(doc)
     result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc),
@@ -139,11 +140,12 @@ def _report(kind: str, doc: dict) -> dict:
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
-        # The rating narrative written when the report was analysed (app/reports/summary.py),
-        # with any analyst corrections laid over it -- the same text the Word summary uses,
-        # so the report on screen, its PDF and the .docx never disagree.
-        "narrative": summary.with_edits((doc.get("summary_ai") or {}).get("text") or {}, doc)
-        or None,
+        # The written rating, and only while it still describes these scores: an edited
+        # pillar score makes the stored text out of date, and the report must not carry
+        # prose about numbers it no longer shows. `narrative_stale` tells the page to
+        # offer regeneration rather than silently showing nothing.
+        "narrative": summary.with_edits(written, doc) if written else None,
+        "narrative_stale": written is None and bool((doc.get("summary_ai") or {}).get("text")),
     })
 
 
@@ -223,6 +225,24 @@ def download_summary(kind: str, id: str, admin: str = Depends(require_admin)):
         "Content-Disposition": f'attachment; filename="{summary.filename(kind, doc)}"',
         "Cache-Control": "no-store",
     })
+
+
+@router.post("/{kind}/submissions/{id}/reports")
+def generate_reports(kind: str, id: str, admin: str = Depends(require_admin)):
+    """Write the rating for the report as it stands -- including any scores the analyst
+    has changed -- so the detailed report, the Word summary and the page-scores export
+    all describe the same rating (user, 2026-09-21).
+
+    An analysis produces the scores and the one-pager; this is the step that writes the
+    prose, and it is asked for rather than paid for on every submission."""
+    col, doc = _load(kind, id)
+    _not_running(doc)
+    if not summary.available(kind, doc):
+        raise HTTPException(409, summary.NOT_AVAILABLE)
+    if not summary.ai_configured(kind):
+        raise HTTPException(503, "The rating text can't be written: no AI key is configured.")
+    summary.narrative(kind, doc, summary.build_facts(kind, doc))  # raises 502 if it fails
+    return _report(kind, _reload(col, doc))
 
 
 @router.post("/{kind}/submissions/{id}/report/logo")

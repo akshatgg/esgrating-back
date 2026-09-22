@@ -96,7 +96,7 @@ def test_the_guide_replaces_the_leftover_page_score_fields():
     assert "A Detailed explanation of the score" not in out
     assert "contributed positively" not in out
     assert '- "sector": The sector of the company.' in out        # untouched
-    assert '- "reason": One short line for each point you scored' in out
+    assert '- "reason": One line for each point you scored' in out
     assert out.endswith("Text:\n{text}")
 
 

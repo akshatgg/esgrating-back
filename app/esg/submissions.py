@@ -135,11 +135,6 @@ def run_esg_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     for slot in ("logo", "corner_logo"):
         delete_logo_file(edits_before.get(slot))
 
-    # The rating narrative is written now, from the scores just stored, so the detailed
-    # report and the Word summary open with it ready (user, 2026-09-20). Imported inside
-    # the function: app.reports.summary reaches into both calculators.
-    from app.reports.summary import write_narrative
-    write_narrative("esg", esg_submissions_collection().find_one({"_id": sub_id}) or {})
 
 
 def serialize_doc(obj):

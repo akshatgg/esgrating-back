@@ -210,7 +210,7 @@ Text:
     assert '- "score": A number between 0 and 100.' not in first
     assert '- "reason": A Detailed explanation of the score.' not in first
     assert '- "kpi_scores": A list of [point number, score] pairs' in first and "81-100:" in first
-    assert '- "reason": One short line for each point you scored' in first
+    assert '- "reason": One line for each point you scored' in first
     assert '- "positive_keywords": The words or short phrases from this text that earned' in first
     assert '- "negative_keywords": The words or short phrases from this text that show poor' in first
     assert "%1$s" not in first and "%2$s" not in first and "%3$s" not in first

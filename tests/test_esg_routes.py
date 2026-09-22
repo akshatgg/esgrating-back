@@ -674,11 +674,13 @@ def test_pillar_typed_by_hand_is_carried_into_the_kpi_assessment_and_csv(admin_c
     stored = db.esg_submissions.find_one({"_id": sid})["final"]
     assert stored["kpi_coverage"]["Environment"]["analyst_score"] == 75
 
-    # CSV summary rows say the total was set by the analyst.
+    # The export carries the score and says nothing about who set it: it is a client
+    # document, and a revised score is internal to the rating (user, 2026-09-21).
     from app.esg import scoring
     rows = scoring.summary_rows(stored)
-    assert ["Environment total", "", "75", "Set by analyst (KPI total 60)"] in rows
+    assert ["Environment total", "", "75", ""] in rows
     assert ["Social total", "", "30", ""] in rows
+    assert not any("analyst" in str(cell).lower() for row in rows for cell in row)
 
     # Removing the typed score clears the note; reset restores the AI version.
     cleared = admin_client.post(f"{base}/preview", json={"pillar_overrides": {"E": None}}).json()

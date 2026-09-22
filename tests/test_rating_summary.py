@@ -183,12 +183,17 @@ def test_send_attaches_the_summary(admin_client, db, fake_ai, monkeypatch):
     assert sent[0][1].mime == summary.DOCX_MIME
 
 
-def test_summary_scorecard_shows_a_pillar_set_by_analyst(admin_client, db, fake_ai):
+def test_the_word_summary_never_says_a_score_was_set_by_an_analyst(admin_client, db, fake_ai):
+    """A revised score is carried like any other. The delivered document does not announce
+    that a human set it, and never calls itself analyst-edited (user, 2026-09-21)."""
     sid = _esg(db)
     admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits", json={"pillar_overrides": {"E": 80}})
     text = _text_of(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content)
-    assert "Environment | 80 | A | Excellent (set by analyst; KPI total 43.33)" in text
+
+    assert "Environment | 80 | A | Excellent" in text
     assert "ENVIRONMENT\n80\nA · Excellent" in text
+    assert "analyst" not in text.lower() and "edited" not in text.lower()
+    # The writer is still told, so the text it produces reflects the revised score.
     assert '"set_by_analyst": true' in fake_ai[-1][1]
 
 
