@@ -9,10 +9,9 @@ It is a database setting rather than an environment variable so an admin can mov
 billing without a deploy, and it is read on every call so the change takes effect on the
 next analysis rather than the next restart.
 
-The default is "aws" (user, 2026-09-24). A deployment that has no AWS credentials and no
-setting stored would then fail every call, so resolve() falls back to "openai" when the
-AWS credential chain is empty -- a missing credential is a configuration problem, not a
-reason to stop rating.
+The default is "openai" until Bedrock is proven against a real report: see DEFAULT below.
+resolve() also falls back to "openai" when the AWS credential chain is empty, so a server
+with no credentials keeps rating instead of failing every call.
 """
 import logging
 
@@ -27,7 +26,12 @@ KEY = "llm_provider"
 AWS = "aws"
 OPENAI = "openai"
 PROVIDERS = (AWS, OPENAI)
-DEFAULT = AWS
+# OpenAI until Bedrock is proven end to end. AWS was the default briefly and it took
+# production down: the account has no model access for gpt-5.6 ("not available for this
+# account"), and gpt-oss is not served on the OpenAI-compatible endpoint this code uses,
+# so every scoring call failed and no report could be produced. An admin can still pick
+# AWS on the dashboard; it must not be what a fresh deployment does on its own.
+DEFAULT = OPENAI
 
 LABELS = {
     AWS: "AWS (Amazon Bedrock)",

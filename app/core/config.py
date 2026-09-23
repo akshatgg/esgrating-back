@@ -13,8 +13,11 @@ class Settings(BaseSettings):
     # The model each provider is asked for. Bedrock names the same models differently, so
     # they are separate settings: whichever provider an admin picks on the dashboard
     # (app/core/llm_settings.py), the right id is sent to the right endpoint.
-    esg_bedrock_model: str = "openai.gpt-5.6-luna"
-    bfsi_bedrock_model: str = "openai.gpt-5.6-luna"
+    # The "in." prefix is an inference profile, not decoration: gpt-5.6 reports
+    # inferenceTypesSupported=["INFERENCE_PROFILE"], so the bare model id is rejected and
+    # every call fails. "in." keeps inference in India; "global." would route anywhere.
+    esg_bedrock_model: str = "in.openai.gpt-5.6-luna"
+    bfsi_bedrock_model: str = "in.openai.gpt-5.6-luna"
     # Where Bedrock runs. ap-south-1 keeps inference in India, which matters for a
     # SEBI-licensed rating: the report text never leaves the country.
     bedrock_region: str = "ap-south-1"

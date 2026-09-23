@@ -4,11 +4,13 @@ import pytest
 from app.core import llm_settings
 
 
-def test_the_default_is_aws(db):
-    """Shipped default: the usage draws on AWS (user, 2026-09-24)."""
+def test_the_default_is_openai(db):
+    """A fresh deployment must rate, not fail. AWS was the default briefly and every call
+    failed: the account has no Bedrock model access. AWS stays available on the dashboard,
+    but it is not what an unconfigured deployment does."""
     assert llm_settings.stored() is None
-    assert llm_settings.provider() == llm_settings.AWS
-    assert llm_settings.DEFAULT == llm_settings.AWS
+    assert llm_settings.provider() == llm_settings.OPENAI
+    assert llm_settings.DEFAULT == llm_settings.OPENAI
 
 
 def test_an_admin_choice_is_stored_and_wins(db):
@@ -39,7 +41,7 @@ def test_aws_without_credentials_falls_back_rather_than_failing(db, monkeypatch)
 def test_the_endpoint_reads_and_sets_it(admin_client, db, monkeypatch):
     monkeypatch.setattr(llm_settings, "aws_credentials_available", lambda: True)
     body = admin_client.get("/api/admin/settings/llm-provider").json()
-    assert body["provider"] == "aws" and body["chosen_by_admin"] is False
+    assert body["provider"] == "openai" and body["chosen_by_admin"] is False
     assert [o["value"] for o in body["options"]] == ["aws", "openai"]
 
     out = admin_client.put("/api/admin/settings/llm-provider", json={"provider": "openai"})
