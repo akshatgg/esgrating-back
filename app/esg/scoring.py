@@ -372,20 +372,18 @@ def category_score(best: dict[str, float]) -> float:
     return round(sum(best.values()) / (len(best) * MAX_SCORE) * 100, 2)
 
 
-def capped_score(scores: list[float]) -> tuple[float, bool]:
+def best_score(scores: list[float]) -> float:
     """A KPI's score from every page contribution it earned: the strongest.
 
-    The second value is whether a cap was applied, and is now always False. Until
-    2026-09-23 a KPI whose evidence was poor on any page (1-POOR_TO) was held down to
-    CAP_SCORE. SCORE_GUIDE sections 5 and 26 rule that out -- "weak evidence from one page
-    must not override stronger relevant evidence elsewhere", and the final score is "the
-    strongest reliable, relevant and applicable evidence available across the COMPLETE
-    source document" -- so the cap is not applied to anything scored under his prompt.
+    SCORE_GUIDE sections 5 and 26: "weak evidence from one page must not override stronger
+    relevant evidence elsewhere", and the final score is "the strongest reliable, relevant
+    and applicable evidence available across the COMPLETE source document".
 
-    The flag, CAP_SCORE and POOR_TO stay because reports scored before this still carry
-    "capped": True on their rows and must keep rendering the way they were issued."""
+    Until 2026-09-23 a KPI whose evidence was poor on any page was held down to CAP_SCORE.
+    Nothing applies that now; CAP_SCORE and the "capped" flag remain only so reports issued
+    under it keep rendering the way the client was given them."""
     scores = [s for s in scores if s > 0]
-    return (max(scores), False) if scores else (0.0, False)
+    return max(scores) if scores else 0.0
 
 
 def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
@@ -395,7 +393,7 @@ def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
 
     pages is [(page_no, {KPI name: 0-100})], or with a third element {KPI name: reason} and
     a fourth {KPI name: evidence_type}. A KPI takes its strongest page contribution
-    (capped_score); its evidence is the page that produced it.
+    (best_score); its evidence is the page that produced it.
 
     meta is {KPI name: {theme, key_issue}} from esg_kpis. With it the category score is the
     methodology's own: indicators weighted by 8.3 evidence level and 7.2 materiality, then
@@ -422,10 +420,10 @@ def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
     final = {}
     rows = []
     for k in kpis:
-        score, capped = capped_score([v for v, _p, _r in seen[k]])
+        score = best_score([v for v, _p, _r in seen[k]])
         final[k] = score
-        row = kpi_row(k, score, sorted(found_on[k], key=page_sort_key), capped,
-                      _evidence(seen[k], capped))
+        row = kpi_row(k, score, sorted(found_on[k], key=page_sort_key),
+                      evidence=_evidence(seen[k]))
         info = (meta or {}).get(k) or {}
         if info:
             row["theme"] = info.get("theme", "")
@@ -444,7 +442,6 @@ def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
         # than a pillar disappearing from the rating.
         if weighted["score"] is not None:
             detail["score"] = weighted["score"]
-            detail["flat_score"] = category_score(final)
         detail["weighting"] = {"themes": weighted["themes"], "applicable": weighted["applicable"],
                                "excluded": weighted["excluded"],
                                "sector": (methodology.sector_profile(sector) or ("", ()))[0]}
@@ -457,15 +454,15 @@ def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
 EVIDENCE_ALSO = 2
 
 
-def _evidence(entries: list, capped: bool) -> dict:
-    """Why a KPI scored what it scored. {page, reason, score} of the page the final score
-    came from -- the worst page when it was capped, else the best -- plus `also`: the other
-    pages that scored it, best first, so a score drawn from several pages can be explained
-    by all of them and not just one (user, 2026-09-20). {} when the answer gave no reason."""
+def _evidence(entries: list) -> dict:
+    """Why a KPI scored what it scored. {page, reason, score} of the page the score came
+    from, plus `also`: the other pages that scored it, best first, so a score drawn from
+    several pages can be explained by all of them and not just one (user, 2026-09-20).
+    {} when the answer gave no reason."""
     scored = [e for e in entries if e[0] > 0]
     if not scored:
         return {}
-    score, page, reason = min(scored) if capped else max(scored)
+    score, page, reason = max(scored)
     if not reason:
         return {}
     ev = {"page": page, "reason": reason, "score": score}

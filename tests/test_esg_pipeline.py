@@ -101,8 +101,8 @@ def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monk
     scoring_calls = [c for c in fake.calls if "score this" in c]
     assert len(scoring_calls) == 6
     assert all('"kpi_findings"' in c and '"score_contribution"' in c for c in scoring_calls)
-    # 2 classification calls (one per page, step 0) + 6 scoring + 3 keyword-ranking.
-    assert len(fake.calls) == 2 + 6 + 3
+    # No classification pass any more: 6 scoring + 3 keyword-ranking.
+    assert len(fake.calls) == 6 + 3
     # Category = best KPI scores as a % of the maximum: (32 + 80) / 200 -> 56, whatever the
     # AI's own page score (90 / 60 / 50) was.
     assert final["environmental_score"] == 56 and final["social_score"] == 56 and final["governance_score"] == 56

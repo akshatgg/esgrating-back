@@ -44,15 +44,14 @@ def test_methodology_example():
     assert scoring.evaluate_score(overall) == ("D", "Below Average")
 
 
-def test_a_kpi_takes_its_strongest_evidence_and_is_never_capped():
+def test_a_kpi_takes_its_strongest_evidence():
     """SCORE_GUIDE sections 5 and 26: the final KPI score is the strongest reliable evidence
     across the whole document, and weak evidence on one page must not override it."""
-    assert scoring.capped_score([75, 15]) == (75, False)      # the poor page no longer caps
-    assert scoring.capped_score([15, 8]) == (15, False)
-    assert scoring.capped_score([20, 90]) == (90, False)
-    assert scoring.capped_score([21, 90]) == (90, False)
-    assert scoring.capped_score([]) == (0.0, False)
-    assert scoring.capped_score([0, 0]) == (0.0, False)
+    assert scoring.best_score([75, 15]) == 75      # the poor page no longer caps
+    assert scoring.best_score([15, 8]) == 15
+    assert scoring.best_score([20, 90]) == 90
+    assert scoring.best_score([]) == 0.0
+    assert scoring.best_score([0, 0]) == 0.0
 
 
 def test_an_analyst_edit_replaces_the_ai_score():
@@ -134,34 +133,32 @@ def _entries(*rows):
 def test_evidence_keeps_the_other_pages_that_scored_the_kpi():
     ev = scoring._evidence(_entries((85, 11, "down 22% vs a 2030 target"),
                                     (61, 52, "renewables at 31%"),
-                                    (40, 60, "policy only")), capped=False)
+                                    (40, 60, "policy only")))
     assert ev["page"] == 11 and ev["score"] == 85
     assert [a["page"] for a in ev["also"]] == [52, 60]
     assert ev["also"][0]["reason"] == "renewables at 31%"
 
 
-def test_evidence_of_a_capped_kpi_leads_with_the_poor_page():
-    """The score came from the poor page, so that is the reason; the good pages follow,
-    which is what explains a 20 sitting under a list of ten pages."""
-    ev = scoring._evidence(_entries((85, 11, "down 22%"), (15, 57, "missed the interim target")),
-                           capped=True)
-    assert (ev["page"], ev["score"]) == (57, 15)
-    assert ev["also"] == [{"page": 11, "score": 85, "reason": "down 22%"}]
+def test_evidence_leads_with_the_page_the_score_came_from():
+    """The strongest page sets the score, so it gives the reason; the weaker page follows
+    as supporting context rather than replacing it (SCORE_GUIDE section 5)."""
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (15, 57, "missed the interim target")))
+    assert (ev["page"], ev["score"]) == (11, 85)
+    assert ev["also"] == [{"page": 57, "score": 15, "reason": "missed the interim target"}]
 
 
 def test_evidence_keeps_at_most_two_supporting_pages():
-    ev = scoring._evidence(_entries(*[(90 - i, i, f"reason {i}") for i in range(1, 8)]), capped=False)
+    ev = scoring._evidence(_entries(*[(90 - i, i, f"reason {i}") for i in range(1, 8)]))
     assert len(ev["also"]) == scoring.EVIDENCE_ALSO == 2
 
 
 def test_evidence_skips_pages_the_answer_gave_no_reason_for():
-    ev = scoring._evidence(_entries((85, 11, "down 22%"), (61, 52, ""), (40, 60, "policy only")),
-                           capped=False)
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (61, 52, ""), (40, 60, "policy only")))
     assert [a["page"] for a in ev["also"]] == [60]
 
 
 def test_a_kpi_that_scored_nowhere_has_no_evidence():
-    assert scoring._evidence(_entries((0, 3, "only mentioned")), capped=False) == {}
+    assert scoring._evidence(_entries((0, 3, "only mentioned"))) == {}
 
 
 def test_category_detail_carries_the_evidence_onto_the_kpi_row():

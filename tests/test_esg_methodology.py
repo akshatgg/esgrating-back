@@ -253,8 +253,7 @@ def test_category_detail_scores_by_the_methodology_when_the_taxonomy_is_known():
     emission = next(t for t in detail["weighting"]["themes"] if t["theme"] == "Emission")
     assert emission["score"] == 70.0
     # Pillar: (70*5.0 + 30*1.0) / 6.0 = 63.33, against a flat average of 53.33.
-    assert detail["score"] == pytest.approx(63.33, abs=0.01)
-    assert detail["flat_score"] == pytest.approx(53.33, abs=0.01)
+    assert detail["score"] == pytest.approx(63.33, abs=0.01)   # flat average would be 53.33
     assert detail["weighting"]["sector"] == "Materials"
 
 

@@ -67,39 +67,6 @@ def attach_page_kpis(esg_records):
             r["review"] = note
 
 
-def classify_page(text):
-    """Step 0 (app/esg/scoring.py): the categories one page has ESG content about.
-
-    [] means the page has none and is not scored at all. None means the call or its answer
-    failed -- the caller then scores every category for that page, so a page is never
-    dropped because of a failed classification."""
-    try:
-        response = llm_mod.get_llm().generate_score(scoring.classify_prompt(text))
-        return scoring.parse_categories(parse_answer(response))
-    except Exception as e:
-        logger.error(f"Page classification failed, scoring every category: {e}")
-        return None
-
-
-def classify_pages(texts):
-    """{index: [categories]} for the given page texts, all calls in flight together. A
-    page whose classification failed maps to every category."""
-    out = {}
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(classify_page, text): i for i, text in enumerate(texts)}
-        for future in concurrent.futures.as_completed(futures):
-            i = futures[future]
-            try:
-                cats = future.result()
-            except Exception as e:
-                logger.error(f"Page classification failed, scoring every category: {e}")
-                cats = None
-            out[i] = list(scoring.CATEGORIES) if cats is None else cats
-    counts = Counter(c for cats in out.values() for c in cats)
-    logger.info(f"Pages by category: {dict(counts)} of {len(texts)} pages")
-    return out
-
-
 def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
@@ -273,21 +240,12 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             for category in scores:
                 read_prompt(category)  # fail loudly before any scoring if a prompt is missing
 
-            # Step 0: one call per page records what the page contains -- its pillars,
-            # themes, relevance and reporting period (CLASSIFY_GUIDE section 17).
-            #
-            # It does NOT decide what is scored. CLASSIFY_GUIDE sections 3 and 18 are
-            # explicit: "Never allow page classification to suppress a page from the full
-            # evidence analysis" and "Every page remains available for KPI evidence
-            # evaluation". So every page with text is scored against all three pillars.
-            # This is what the client's prompt requires and it costs more calls than
-            # scoring only the classified pillars did (user, 2026-09-24).
+            # No classification pass. CLASSIFY_GUIDE sections 3 and 18 forbid it deciding
+            # what is analysed -- "Every page remains available for KPI evidence
+            # evaluation" -- so every page with text goes to all three pillars, and a call
+            # whose answer changes nothing is one call and ~2,880 tokens per page for
+            # nothing (user, 2026-09-24). BFSI still classifies; it filters on the answer.
             pages_with_text = [p for p in processed_data if p.get("text", "").strip()]
-            page_cats = classify_pages([p["text"] for p in pages_with_text])
-            # Kept against the page it describes: the pillars his classification engine
-            # reported. Scoring ignores it (above), the record keeps it.
-            classified = {page.get("page_no"): page_cats.get(i)
-                          for i, page in enumerate(pages_with_text)}
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
@@ -310,7 +268,6 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                                     "filename": filename,
                                     "page_no": page_no,
                                     "category": category,
-                                    "classified_pillars": classified.get(page_no),
                                 })
                                 scores[category].append(analysis)
                         except Exception as e:
