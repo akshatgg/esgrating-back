@@ -76,6 +76,9 @@ _CATTEXT, _DRIVERS = "cattext", "drivers"
 # can change them, and the overall score follows (user, 2026-09-22). ESG only: BFSI's
 # weights come from the loan type (app/bfsi/options.py WEIGHTAGE).
 _WEIGHTS = "weights"
+# The Reason a KPI carries in the KPI Assessment, per pillar and KPI name, so an analyst
+# can correct what the scoring call wrote (user, 2026-09-23).
+_KPITEXT = "kpitext"
 CHOICES = {"header_slot": ("text", "logo", "none")}
 
 FIELD_SPECS = {
@@ -90,7 +93,8 @@ FIELD_SPECS = {
         # The written rating (app/reports/summary.py), correctable in the report.
         # The Rating Summary's opening sentence. Written from the scores unless an analyst
         # replaces it; clearing it goes back to the generated one (user, 2026-09-23).
-        "rating_summary_text": _LONG,
+        "rating_summary_text": _LONG, "kpi_assessment_note": _LONG,
+        "kpi_reasons": _KPITEXT,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _DRIVERS, "weaknesses": _DRIVERS,
@@ -108,7 +112,8 @@ FIELD_SPECS = {
         # The written rating (app/reports/summary.py), correctable in the report.
         # The Rating Summary's opening sentence. Written from the scores unless an analyst
         # replaces it; clearing it goes back to the generated one (user, 2026-09-23).
-        "rating_summary_text": _LONG,
+        "rating_summary_text": _LONG, "kpi_assessment_note": _LONG,
+        "kpi_reasons": _KPITEXT,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _DRIVERS, "weaknesses": _DRIVERS,
@@ -307,6 +312,22 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                     items.append({"headline": headline, "detail": detail})
             if items:
                 out["fields"][key] = items
+        elif spec == _KPITEXT:
+            cats = {}
+            known = {c: {r["kpi"] for r in ctx["kpis"].get(c) or []} for c in CATS}
+            for cat, texts in _as_dict(value, f"Field {key!r}").items():
+                cat = _cat(cat, f"Field {key!r}")
+                per_kpi = {}
+                for kpi, text in _as_dict(texts, f"{key}.{cat}").items():
+                    if kpi not in known[cat]:
+                        raise UserError(f"{key}.{cat}: {kpi!r} is not a KPI of this report.")
+                    text = _text(text, f"Reason for {kpi}", LONG_MAX, multiline=True)
+                    if text != "":
+                        per_kpi[kpi] = text
+                if per_kpi:
+                    cats[cat] = per_kpi
+            if cats:
+                out["fields"][key] = cats
         elif spec == _REASONS:
             cats = {}
             for cat, texts in _as_dict(value, "Field 'reasons'").items():
@@ -653,6 +674,18 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             # the detailed report, CSV and summary all show the same pillar score.
             for cat in CATS:
                 esg_scoring.mark_pillar(final["kpi_coverage"].get(ESG_CATEGORY[cat]), final[f"{ESG_PREFIX[cat]}_score"])
+            # A Reason corrected by an analyst replaces the one the scoring call wrote, on
+            # the report itself -- so the PDF, the Word summary and the writer all read the
+            # corrected text rather than the original (user, 2026-09-23).
+            for cat, texts in (fields.get("kpi_reasons") or {}).items():
+                rows = (final["kpi_coverage"].get(ESG_CATEGORY[cat]) or {}).get("kpis") or []
+                for row in rows:
+                    text = texts.get(row.get("kpi"))
+                    if text:
+                        evidence = dict(row.get("evidence") or {})
+                        evidence["reason"] = text
+                        evidence.pop("also", None)  # the supporting pages explained the old text
+                        row["evidence"] = evidence
         # The marks an analyst allotted each pillar, stored on the report as the table
         # shows them, so the overall score, the CSV, the Word summary and the writer all
         # read the same ones through weights_for() (user, 2026-09-22).

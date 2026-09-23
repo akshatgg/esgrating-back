@@ -379,3 +379,61 @@ def test_the_rating_summary_sentence_is_plain_text(admin_client, db):
     resp = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
                             json={"fields": {"rating_summary_text": "<b>rated</b>"}})
     assert resp.status_code == 422
+
+
+# --- correcting a Reason and the KPI Assessment note (user, 2026-09-23) --------------
+
+def _kpi_report(db):
+    return db.esg_submissions.insert_one({
+        "company_name": "Acme Ltd", "report_year": "2025-2026",
+        "final": {"scoring_method": "kpi_score",
+                  "environmental_score": 40.0, "social_score": 40.0, "governance_score": 40.0,
+                  "composite_score": 40.0,
+                  "kpi_coverage": {"Environment": {"method": "kpi_score", "score": 40.0, "kpis": [
+                      {"kpi": "Emissions reduction policy", "score": 40.0, "points": 40.0,
+                       "level": "partial", "pages": [7],
+                       "evidence": {"page": 7, "score": 40.0, "reason": "what the AI wrote"}}]}}},
+    }).inserted_id
+
+
+def test_a_corrected_reason_replaces_the_one_the_ai_wrote(admin_client, db):
+    sid = _kpi_report(db)
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    own = "Climate action is named, but no policy or measured result is given."
+
+    body = {"fields": {"kpi_reasons": {"E": {"Emissions reduction policy": own}}}}
+    row = admin_client.post(f"{base}/preview", json=body).json()[
+        "effective"]["final"]["kpi_coverage"]["Environment"]["kpis"][0]
+    assert row["evidence"]["reason"] == own
+
+    # Saved, it is on the report itself -- so the PDF, the Word summary and the writer
+    # all read the corrected text.
+    admin_client.put(f"{base}/edits", json=body)
+    stored = db.esg_submissions.find_one({"_id": sid})["final"]
+    assert stored["kpi_coverage"]["Environment"]["kpis"][0]["evidence"]["reason"] == own
+
+
+def test_a_reason_can_only_be_set_for_a_kpi_of_this_report(admin_client, db):
+    sid = _kpi_report(db)
+    resp = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
+                            json={"fields": {"kpi_reasons": {"E": {"Palm oil sourcing policy": "x"}}}})
+    assert resp.status_code == 422 and "not a KPI of this report" in resp.json()["detail"]
+
+
+def test_the_kpi_assessment_note_can_be_reworded(admin_client, db):
+    sid = _kpi_report(db)
+    own = "Each KPI is scored on the evidence this report provides."
+    saved = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
+                             json={"fields": {"kpi_assessment_note": own}}).json()
+    assert saved["edits"]["fields"]["kpi_assessment_note"] == own
+
+
+def test_clearing_a_corrected_reason_restores_the_ai_text(admin_client, db):
+    sid = _kpi_report(db)
+    base = f"/api/admin/esg/submissions/{sid}/report"
+    admin_client.put(f"{base}/edits",
+                     json={"fields": {"kpi_reasons": {"E": {"Emissions reduction policy": "mine"}}}})
+    admin_client.put(f"{base}/edits", json={"fields": {}})
+
+    row = admin_client.get(base).json()["effective"]["final"]["kpi_coverage"]["Environment"]["kpis"][0]
+    assert row["evidence"]["reason"] == "what the AI wrote"
