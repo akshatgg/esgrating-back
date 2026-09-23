@@ -26,6 +26,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import HTTPException
 
+from app.reports import prompts
 from app.bfsi import store as bfsi_store
 from app.bfsi.options import INDUSTRIES
 from app.bfsi.scoring import bfsi_overall, is_kpi_scored
@@ -240,112 +241,42 @@ def _band(pct: float, high: float, moderate: float) -> str:
 
 # --- 2. Narrative (one AI call, cached on the submission) ---------------------------------
 
-NARRATIVE_SYSTEM = (
-    "You are an ESG rating analyst writing the text of an ESG Rating Summary.\n"
-    "Use ONLY the validated KPI results supplied below -- the scores, KPIs, themes and evidence "
-    "the KPI validation and scoring engine produced. Do NOT independently search for, infer, "
-    "invent or introduce additional KPIs. A KPI may be used only if it was evidenced in that "
-    "data and carries its supporting evidence; every strength, weakness and priority must be "
-    "directly traceable to a validated KPI, theme or pillar score. If no validated KPI supports "
-    "a statement, do not make the statement.\n"
-    "Bring in nothing from your own knowledge of ESG. Do not introduce standards, frameworks, "
-    "guidelines, certifications, policies, targets, metrics, incidents, commitments or practices "
-    "that are not in the data, and do not infer that a company has one merely because its sector "
-    "normally would. Do not invent figures. Do not use other reports, other companies or "
-    "anything outside the data supplied.\n"
-    "EVIDENCE PRINCIPLE. Do not treat keyword presence as positive evidence. Do not treat a "
-    "general statement as proof that a KPI is met. Do not treat a policy or commitment as proof "
-    "of performance. Do not treat an intention or a future target as evidence that it has been "
-    "achieved. Do not treat an initiative as proof of a positive outcome. Read what the evidence "
-    "actually shows and keep its direction: if the evidence says emissions rose despite a "
-    "reduction programme, that is not positive emissions performance. A low score means the "
-    "evidence was weak or the performance poor -- never present it as a strength.\n"
-    "The text must reflect the score and the direction the scoring engine recorded for each KPI. "
-    "Never change, reinterpret, round or override a validated score.\n"
-    "A missing KPI means the source report does not provide validated evidence for it. It does "
-    "NOT mean the company does not perform the activity. Write gaps as 'No disclosure on ...', "
-    "'Limited disclosure on ...', 'The report does not provide evidence of ...' or 'The report "
-    "provides limited evidence on ...'. Do not write 'The company does not ...' unless the data "
-    "explicitly and directly says so.\n"
-    "Build the text from what this report evidenced -- the KPIs found, their scores, their "
-    "evidence and their themes -- and name missing KPIs only as absent disclosure, in the order "
-    "given. Priorities must stay inside the themes this report already covers; never recommend "
-    "work in an area the report shows no involvement in.\n"
-    # Strengths and weaknesses are written the way a rating rationale reads: a headline
-    # naming the driver, then a paragraph of the evidence behind it -- not a list of KPI
-    # names (user, 2026-09-20).
-    "Each strength and weakness is a DRIVER, not a KPI name. Its 'headline' names the driver "
-    "in the company's own terms (for example 'Low environmental footprint arising from the "
-    "nature of operations'), never a bare KPI name and never a score. Its 'detail' is one "
-    "paragraph of 70 to 120 words that groups the KPIs behind that driver, gives what their "
-    "evidence actually showed -- the figures, targets, certifications, pages -- and ends with "
-    "what it means for this rating. Quote a KPI's score only where it carries the point; never "
-    "list KPI names one after another, and never repeat a driver already covered.\n"
-    "A weakness says what the report does not evidence or evidences weakly, why that matters "
-    "for the rating, and what disclosure would raise it -- drawn only from the gaps supplied.\n"
-    "'rating_rationale' is the report's Scoring Rationale, read by anyone who asks how the "
-    "scores were arrived at: a LIST of TWO OR THREE paragraphs, 200 to 320 words in total -- "
-    "one string per paragraph, never one long string. Take each pillar in turn -- what its evidence showed, which KPIs carried the "
-    "score and which were missing, and how that produced the pillar's number -- then close with "
-    "how the three weigh together into the overall score and its grade. Continuous prose, no "
-    "page-by-page listing and no bare KPI names.\n"
-    "'favourable_factors' and 'constraints' are the two halves of the rating rationale, each "
-    "one paragraph of 70 to 120 words: what the score favourably factors in, and what it is "
-    "constrained by. Together they must explain the grade to a reader who sees nothing else.\n"
-    # The body of the report: a written assessment of each pillar, the way a rating agency
-    # writes one, not a summary of the table above it (user, 2026-09-20).
-    "Each entry of 'pillar_narratives' is the WRITTEN ASSESSMENT of that pillar, given as a "
-    "LIST of THREE OR FOUR paragraphs, 250 to 400 words in total -- one string per "
-    "paragraph, never one long string. Work through the "
-    "pillar theme by theme, in the order the evidence makes sense, and in each paragraph give "
-    "what the report actually showed -- the figures, targets, certifications, policies, "
-    "programmes and the pages they came from -- then say whether that is good or weak "
-    "performance and why. Say plainly where the company does well and where it falls short, "
-    "and close the pillar by linking what you described to the score it received.\n"
-    "Write continuous prose. Never a list of KPI names, never 'scores 100 in X, Y and Z', "
-    "never a sentence whose subject is a KPI name or a score: the reader wants the company's "
-    "performance, with the KPI evidence as the support for it. Name a score only where it "
-    "carries the point. Where a pillar's evidence is thin, say so and say what is missing "
-    "instead of padding the paragraphs.\n"
-    "Plain professional English, short sentences. Respond in JSON with exactly these fields and "
-    "no others: "
-    '{"executive_summary": "<3-4 sentences>", "key_rating_drivers": "<1 sentence>", '
-    '"favourable_factors": "<one paragraph>", "constraints": "<one paragraph>", '
-    '"disclosure_headline": "<1 sentence on how complete and specific the evidence is>", '
-    '"pillar_narratives": {"E": ["<paragraph>", "<paragraph>", "<paragraph>", '
-    '"<optional fourth>"], "S": [...], "G": [...]}, '
-    '"strengths": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
-    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
-    '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
-    '"rating_rationale": ["<paragraph>", "<paragraph>", "<optional third>"], '
-    '"rating_interpretation": "<2 sentences on how to read this grade>"}'
-)
-    
-# The drivers are asked for separately (production, 2026-09-21). Asked for together with
-# the pillar assessments, the model returned valid JSON with the pillars written and
-# strengths, weaknesses, priorities and the rationale simply absent -- about 2,500 words
-# in one object was more than it would produce. Two calls, each a manageable answer.
-DRIVERS_SYSTEM = (
-    # Everything up to the pillar instruction: the same rules and the same definition of
-    # a driver, without the pillar-assessment brief this call is not answering.
-    NARRATIVE_SYSTEM.split("Each entry of 'pillar_narratives'")[0]
-    + "Plain professional English, short sentences. Respond in JSON with exactly these "
-    "fields and no others: "
-    '{"strengths": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
-    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
-    '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
-    '"rating_rationale": ["<paragraph>", "<paragraph>", "<optional third>"], '
-    '"rating_interpretation": "<2 sentences on how to read this grade>"}'
-)
+# The CFC Rating Summary Narrative Generator and Driver Analysis Engine prompts, adopted
+# verbatim from the client's own documents (CFC, 2026-09-23; app/reports/prompts/).
+#
+# They replace the prompts written here before them, on the instruction to follow his
+# prompts as issued. His narrative section 26 ends "Do not return any additional fields",
+# so nothing is appended to either: the fields the report renders are now exactly his.
+#
+# Two calls, not one, is kept from the previous implementation (production, 2026-09-21):
+# asked for everything at once the model returned the pillar narratives and simply omitted
+# the drivers. His DRIVERS_SYSTEM is written as its own engine, so it is the second call.
+NARRATIVE_SYSTEM = prompts.load("narrative_system")
 
-# Fields each call must come back with. An answer missing them is not stored: a
-# half-written narrative cached once would be served for the life of the report.
-NARRATIVE_REQUIRED = ("executive_summary", "favourable_factors", "constraints", "pillar_narratives")
+DRIVERS_SYSTEM = prompts.load("drivers_system")
+
+# His narrative section 26 and drivers section 28 fields. An answer missing them is not
+# stored: a half-written narrative cached once would be served for the life of the report.
+NARRATIVE_REQUIRED = ("executive_summary", "pillar_narratives", "rating_rationale")
 DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
 
 # Bumped whenever the shape above changes: the fingerprint is over the rating data, so
 # without it a report cached under the old shape would keep serving the old text.
-NARRATIVE_VERSION = 7
+# His versioning note: a unique version string, incremented whenever NARRATIVE_SYSTEM,
+# DRIVERS_SYSTEM, SCORE_GUIDE, CLASSIFY_GUIDE, the KPI scoring logic, the KPI library or
+# the methodology changes, so a summary generated under older logic is never served again.
+NARRATIVE_VERSION = "CFC_ESG_RATING_V1.0_2026_09_24"
+
+# The engines that produced a rating, stored with it so CFC can identify later exactly
+# which logic issued any past assessment (his versioning note).
+ENGINE_VERSIONS = {
+    "methodology_version": "CFC_ESG_METHOD_V1.0_2026-08-20",
+    "kpi_library_version": "CFC_KPI_LIBRARY_V1.0",
+    "classify_engine_version": "CFC_CLASSIFY_V1.0",
+    "scoring_engine_version": "CFC_SCORING_V1.0",
+    "drivers_engine_version": "CFC_DRIVERS_V1.0",
+    "narrative_engine_version": "CFC_NARRATIVE_V1.0",
+}
 
 
 def _kpi_evidence(r: dict) -> str:

@@ -8,13 +8,9 @@ from app.core.config import settings
 from app.reports import summary
 from tests.test_rating_summary import TEXT, _esg
 
-NARRATIVE = {
-    **TEXT,
-    "favourable_factors": "The score favourably factors in measured water performance.",
-    "constraints": "It is constrained by the absence of waste disclosure.",
-    "strengths": [{"headline": "Measured water performance", "detail": "Water withdrawn scored 90 on p.12."}],
-    "weaknesses": [{"headline": "No waste disclosure", "detail": "The report does not evidence a waste policy."}],
-}
+# The client's narrative section 26 shape: strengths and weaknesses are short explanatory
+# strings and each pillar narrative is one string, with no fields beyond the ones he lists.
+NARRATIVE = dict(TEXT)
 
 
 @pytest.fixture
@@ -37,7 +33,7 @@ def test_write_narrative_stores_the_text(admin_client, db, ai):
 
     assert summary.write_narrative("esg", doc) is True
     stored = db.esg_submissions.find_one({"_id": sid})["summary_ai"]
-    assert stored["text"]["strengths"][0]["headline"] == "Measured water performance"
+    assert stored["text"]["strengths"][0] == "Water withdrawn (90)"
     assert stored["fingerprint"] and stored["generated_at"]
     # Two calls now: the summary and pillar assessments, then the drivers.
     assert len(ai) == 2
@@ -74,8 +70,8 @@ def test_the_report_payload_carries_the_narrative(admin_client, db, ai):
     summary.write_narrative("esg", db.esg_submissions.find_one({"_id": sid}))
 
     body = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()
-    assert body["narrative"]["strengths"][0]["detail"] == "Water withdrawn scored 90 on p.12."
-    assert body["narrative"]["constraints"].startswith("It is constrained by")
+    assert body["narrative"]["strengths"][1] == "Anti-bribery/corruption policy (85)"
+    assert body["narrative"]["rating_rationale"].startswith("Scores follow")
 
 
 def test_the_report_payload_has_no_narrative_before_one_is_written(admin_client, db):
@@ -106,7 +102,7 @@ def test_a_changed_shape_does_not_reuse_old_cached_text(admin_client, db, ai, mo
     summary.write_narrative("esg", doc)
     first = db.esg_submissions.find_one({"_id": sid})["summary_ai"]["fingerprint"]
 
-    monkeypatch.setattr(summary, "NARRATIVE_VERSION", summary.NARRATIVE_VERSION + 1)
+    monkeypatch.setattr(summary, "NARRATIVE_VERSION", "CFC_ESG_RATING_V9.9_2099_01_01")
     summary.write_narrative("esg", db.esg_submissions.find_one({"_id": sid}))
     assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["fingerprint"] != first
     assert len(ai) == 4  # two generations, two calls each
@@ -118,8 +114,7 @@ def _half_answer(system, _user):
     """What production returned: valid JSON with the pillar assessments written and the
     drivers simply absent. Asked for together, ~2,500 words was more than it would give."""
     if "pillar_narratives" in system:
-        return {k: NARRATIVE[k] for k in
-                ("executive_summary", "favourable_factors", "constraints", "pillar_narratives")}
+        return {k: NARRATIVE[k] for k in summary.NARRATIVE_REQUIRED}
     return {}
 
 
@@ -144,11 +139,10 @@ def test_the_drivers_come_from_their_own_call(admin_client, db, ai):
     assert '"strengths"' in systems[1]
 
     text = db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
-    assert text["pillar_narratives"] and text["strengths"][0]["headline"]
+    assert text["pillar_narratives"] and isinstance(text["strengths"][0], str)
 
 
-@pytest.mark.parametrize("missing", ["executive_summary", "favourable_factors", "constraints",
-                                     "pillar_narratives"])
+@pytest.mark.parametrize("missing", summary.NARRATIVE_REQUIRED)
 def test_the_summary_call_must_answer_with_every_field(admin_client, db, monkeypatch, missing):
     monkeypatch.setattr(settings, "esg_openai_api_key", "test-key")
     answer = {k: v for k, v in NARRATIVE.items() if k != missing}
@@ -162,7 +156,7 @@ def test_the_summary_call_must_answer_with_every_field(admin_client, db, monkeyp
 
 EDITS = {"fields": {"executive_summary": "Corrected by the analyst.",
                     "pillar_narratives": {"E": "The analyst's Environment assessment."},
-                    "strengths": [{"headline": "Analyst headline", "detail": "Analyst detail."}]}}
+                    "strengths": ["The analyst's first strength."]}}
 
 
 def test_the_report_serves_the_analyst_text_over_the_ai_text(admin_client, db, ai):
@@ -173,7 +167,7 @@ def test_the_report_serves_the_analyst_text_over_the_ai_text(admin_client, db, a
     n = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["narrative"]
     assert n["executive_summary"] == "Corrected by the analyst."
     assert n["pillar_narratives"]["E"] == "The analyst's Environment assessment."
-    assert n["strengths"][0]["headline"] == "Analyst headline"
+    assert n["strengths"][0] == "The analyst's first strength."
     # A pillar left alone keeps what the AI wrote.
     assert n["pillar_narratives"]["S"] == NARRATIVE["pillar_narratives"]["S"]
 
@@ -201,13 +195,15 @@ def test_a_correction_must_still_be_plain_text(admin_client, db):
 
 
 def test_driver_corrections_are_validated(admin_client, db):
+    """His narrative section 26 makes each strength one string, so the edit takes a list of
+    strings -- an object is no longer a valid item."""
     sid = _esg(db)
     bad = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
                            json={"fields": {"strengths": [{"headline": "h", "note": "x"}]}})
-    assert bad.status_code == 422 and "unknown key" in bad.json()["detail"]
-    # Blank items are dropped rather than stored as empty drivers.
+    assert bad.status_code == 422
+    # Blank items are dropped rather than stored as empty strengths.
     ok = admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
-                          json={"fields": {"strengths": [{"headline": "", "detail": ""}]}})
+                          json={"fields": {"strengths": ["", "  "]}})
     assert ok.status_code == 200 and "strengths" not in ok.json()["edits"]["fields"]
 
 
@@ -225,7 +221,7 @@ def test_generate_reports_writes_the_narrative(admin_client, db, ai):
     assert admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["narrative"] is None
 
     body = admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").json()
-    assert body["narrative"]["strengths"][0]["headline"] == "Measured water performance"
+    assert body["narrative"]["strengths"][0] == "Water withdrawn (90)"
     assert len(ai) == 2
     assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
 

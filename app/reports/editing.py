@@ -71,7 +71,7 @@ _SHORT, _LONG, _LIST, _CATLISTS, _REASONS = "short", "long", "list", "catlists",
 _CHOICE = "choice"
 # The written rating, so an analyst can correct what the AI wrote: a paragraph block per
 # pillar, and the drivers as a list of {headline, detail} (user, 2026-09-21).
-_CATTEXT, _DRIVERS = "cattext", "drivers"
+_CATTEXT = "cattext"
 # The marks available to each pillar, as the report shows them (35 / 30 / 35). An analyst
 # can change them, and the overall score follows (user, 2026-09-22). ESG only: BFSI's
 # weights come from the loan type (app/bfsi/options.py WEIGHTAGE).
@@ -97,7 +97,7 @@ FIELD_SPECS = {
         "kpi_reasons": _KPITEXT,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
-        "strengths": _DRIVERS, "weaknesses": _DRIVERS,
+        "strengths": _LIST, "weaknesses": _LIST,
         "weights": _WEIGHTS,
     },
     "bfsi": {
@@ -116,7 +116,7 @@ FIELD_SPECS = {
         "kpi_reasons": _KPITEXT,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
-        "strengths": _DRIVERS, "weaknesses": _DRIVERS,
+        "strengths": _LIST, "weaknesses": _LIST,
     },
 }
 FIELD_KEYS = {kind: list(spec) for kind, spec in FIELD_SPECS.items()}
@@ -295,23 +295,6 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                     cats[cat] = block
             if cats:
                 out["fields"][key] = cats
-        elif spec == _DRIVERS:
-            if not isinstance(value, list):
-                raise UserError(f"Field {key!r} must be a list.")
-            if len(value) > LIST_MAX:
-                raise UserError(f"Field {key!r} can have at most {LIST_MAX} items.")
-            items = []
-            for item in value:
-                item = _as_dict(item, f"Field {key!r} item")
-                unknown = set(item) - {"headline", "detail"}
-                if unknown:
-                    raise UserError(f"Field {key!r} item: unknown key {sorted(unknown)[0]!r}.")
-                headline = _text(item.get("headline") or "", f"Field {key!r} headline", SHORT_MAX)
-                detail = _text(item.get("detail") or "", f"Field {key!r} detail", LONG_MAX, multiline=True)
-                if headline or detail:
-                    items.append({"headline": headline, "detail": detail})
-            if items:
-                out["fields"][key] = items
         elif spec == _KPITEXT:
             cats = {}
             known = {c: {r["kpi"] for r in ctx["kpis"].get(c) or []} for c in CATS}
