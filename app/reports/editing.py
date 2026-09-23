@@ -72,6 +72,10 @@ _CHOICE = "choice"
 # The written rating, so an analyst can correct what the AI wrote: a paragraph block per
 # pillar, and the drivers as a list of {headline, detail} (user, 2026-09-21).
 _CATTEXT, _DRIVERS = "cattext", "drivers"
+# The marks available to each pillar, as the report shows them (35 / 30 / 35). An analyst
+# can change them, and the overall score follows (user, 2026-09-22). ESG only: BFSI's
+# weights come from the loan type (app/bfsi/options.py WEIGHTAGE).
+_WEIGHTS = "weights"
 CHOICES = {"header_slot": ("text", "logo", "none")}
 
 FIELD_SPECS = {
@@ -84,9 +88,13 @@ FIELD_SPECS = {
         # the optional line along the bottom.
         "header_slot": _CHOICE, "footer_note": _LONG,
         # The written rating (app/reports/summary.py), correctable in the report.
+        # The Rating Summary's opening sentence. Written from the scores unless an analyst
+        # replaces it; clearing it goes back to the generated one (user, 2026-09-23).
+        "rating_summary_text": _LONG,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _DRIVERS, "weaknesses": _DRIVERS,
+        "weights": _WEIGHTS,
     },
     "bfsi": {
         "company": _SHORT, "sector": _SHORT, "industry": _SHORT, "fy": _SHORT, "report_date": _SHORT,
@@ -98,6 +106,9 @@ FIELD_SPECS = {
         # the optional line along the bottom.
         "header_slot": _CHOICE, "footer_note": _LONG,
         # The written rating (app/reports/summary.py), correctable in the report.
+        # The Rating Summary's opening sentence. Written from the scores unless an analyst
+        # replaces it; clearing it goes back to the generated one (user, 2026-09-23).
+        "rating_summary_text": _LONG,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _DRIVERS, "weaknesses": _DRIVERS,
@@ -255,6 +266,21 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                     cats[cat] = items
             if cats:
                 out["fields"][key] = cats
+        elif spec == _WEIGHTS:
+            marks = {}
+            for cat, mark in _as_dict(value, f"Field {key!r}").items():
+                cat = _cat(cat, f"Field {key!r}")
+                if isinstance(mark, bool) or not isinstance(mark, (int, float)):
+                    raise UserError(f"Field {key}.{cat} must be a number.")
+                if not 0 <= float(mark) <= 100:
+                    raise UserError(f"Field {key}.{cat} must be between 0 and 100.")
+                marks[cat] = float(mark)
+            # All three or none: a partial set would leave the report mixing the analyst's
+            # marks with the method's own.
+            if marks and set(marks) != set(CATS):
+                raise UserError(f"Field {key!r} needs a mark for E, S and G.")
+            if marks:
+                out["fields"][key] = marks
         elif spec == _CATTEXT:
             cats = {}
             for cat, block in _as_dict(value, f"Field {key!r}").items():
@@ -627,11 +653,20 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             # the detailed report, CSV and summary all show the same pillar score.
             for cat in CATS:
                 esg_scoring.mark_pillar(final["kpi_coverage"].get(ESG_CATEGORY[cat]), final[f"{ESG_PREFIX[cat]}_score"])
-        if any(final[f"{ESG_PREFIX[c]}_score"] != base.get(f"{ESG_PREFIX[c]}_score") for c in CATS):
-            # Each report keeps the weights it was scored with (older reports: 30/30/40).
+        # The marks an analyst allotted each pillar, stored on the report as the table
+        # shows them, so the overall score, the CSV, the Word summary and the writer all
+        # read the same ones through weights_for() (user, 2026-09-22).
+        if "weights" in fields:
+            final["weights"] = {ESG_CATEGORY[c]: fields["weights"][c] for c in CATS}
+        # Recompute when a pillar moved OR the marks did: changing only a weight leaves
+        # every pillar score where it was, and the overall must still follow.
+        if "weights" in fields or any(
+            final[f"{ESG_PREFIX[c]}_score"] != base.get(f"{ESG_PREFIX[c]}_score") for c in CATS
+        ):
+            # Each report otherwise keeps the weights it was scored with (older: 30/30/40).
             final["composite_score"] = composite_score(
                 final["environmental_score"], final["social_score"], final["governance_score"],
-                esg_scoring.weights_for(base),
+                esg_scoring.weights_for(final if "weights" in fields else base),
             )
         for key in ("environmental", "social", "governance", "composite"):
             performance, label = evaluate_score(final[f"{key}_score"])

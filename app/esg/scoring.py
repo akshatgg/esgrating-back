@@ -501,7 +501,18 @@ def kpi_best(row: dict) -> float:
 # --- 4 + 5. Overall score and grade ----------------------------------------------------------
 
 def weights_for(final: dict | None) -> dict:
-    """The weights a result was scored with: WEIGHTS for this method, else the old ones."""
+    """The weights this report is scored with: the ones an analyst set on it, else WEIGHTS
+    for this method, else the old ones. Every reader of the weights comes through here --
+    the overall score, the report table, the CSV, the Word summary and the writer -- so a
+    weight changed in the report changes all of them (user, 2026-09-22)."""
+    stored = (final or {}).get("weights")
+    if isinstance(stored, dict) and all(
+        isinstance(stored.get(c), (int, float)) and not isinstance(stored.get(c), bool)
+        for c in CATEGORIES
+    ):
+        # Stored as the marks the report shows (35), used here as the fraction the
+        # overall score is built from (0.35).
+        return {c: float(stored[c]) / 100 for c in CATEGORIES}
     return WEIGHTS if (final or {}).get("scoring_method") == METHOD else LEGACY_WEIGHTS
 
 
