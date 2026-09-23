@@ -1,6 +1,7 @@
 # app/esg/scoring.py -- the ESG calculator's scoring (docs/ESG_SCORING_METHODOLOGY.md).
 import pytest
 
+from app.core.kpis import parse_kpi_list
 from app.esg import scoring
 
 KPIS = ["A", "B", "C", "D"]
@@ -24,51 +25,58 @@ def test_page_score_is_the_average_of_the_page_kpis():
 
 
 def test_methodology_example():
-    """The worked example in docs/ESG_SCORING_METHODOLOGY.md: KPI 9 is scored 75 on one
-    page and 15 (poor performance) on another, so it is held down to 20."""
+    """KPI 9 contributes 75 on one page and 15 on another. SCORE_GUIDE section 5 takes the
+    strongest evidence across the document, so it scores 75 -- the weak page does not pull
+    it down."""
     kpis = [f"KPI {i}" for i in range(1, 11)]
     pages = [(1, {}), (2, {"KPI 8": 45, "KPI 9": 75}), (7, {"KPI 4": 55, "KPI 9": 15})]
     detail = scoring.category_detail(pages, kpis)
     rows = {r["kpi"]: r for r in detail["kpis"]}
     assert (rows["KPI 4"]["score"], rows["KPI 4"]["pages"]) == (55, [7])
     assert (rows["KPI 8"]["score"], rows["KPI 8"]["pages"]) == (45, [2])
-    assert (rows["KPI 9"]["score"], rows["KPI 9"]["pages"]) == (20, [2, 7])
-    assert rows["KPI 9"]["capped"] is True and "capped" not in rows["KPI 4"]
+    assert (rows["KPI 9"]["score"], rows["KPI 9"]["pages"]) == (75, [2, 7])
+    assert "capped" not in rows["KPI 9"] and "capped" not in rows["KPI 4"]
     assert (rows["KPI 1"]["score"], rows["KPI 1"]["pages"]) == (0, [])
-    # The average of all 10 KPI scores: (55 + 45 + 20) / 1000 * 100
-    assert detail["score"] == 12.0
-    overall = scoring.composite_score(12.0, 22, 30)
-    assert overall == pytest.approx(21.30)
+    # The average of all 10 KPI scores: (55 + 45 + 75) / 1000 * 100
+    assert detail["score"] == 17.5
+    overall = scoring.composite_score(17.5, 22, 30)
+    assert overall == pytest.approx(23.225)
     assert scoring.evaluate_score(overall) == ("D", "Below Average")
 
 
-def test_poor_performance_caps_the_kpi_but_only_when_it_is_beaten():
-    assert scoring.capped_score([75, 15]) == (20.0, True)     # good page, poor page -> 20
-    assert scoring.capped_score([15, 8]) == (15.0, False)     # all poor: its own best stands
-    assert scoring.capped_score([20, 90]) == (20.0, True)     # 20 is still poor
-    assert scoring.capped_score([21, 90]) == (90.0, False)    # 21 is weak, not poor
-    assert scoring.capped_score([]) == (0.0, False)
-    assert scoring.capped_score([0, 0]) == (0.0, False)
+def test_a_kpi_takes_its_strongest_evidence():
+    """SCORE_GUIDE sections 5 and 26: the final KPI score is the strongest reliable evidence
+    across the whole document, and weak evidence on one page must not override it."""
+    assert scoring.best_score([75, 15]) == 75      # the poor page no longer caps
+    assert scoring.best_score([15, 8]) == 15
+    assert scoring.best_score([20, 90]) == 90
+    assert scoring.best_score([]) == 0.0
+    assert scoring.best_score([0, 0]) == 0.0
 
 
-def test_an_analyst_edit_replaces_a_capped_score():
+def test_an_analyst_edit_replaces_the_ai_score():
     detail = scoring.category_detail([(2, {"A": 80}), (3, {"A": 10})], ["A", "B"])
-    assert detail["kpis"][0]["score"] == 20 and detail["kpis"][0]["capped"] is True
+    assert detail["kpis"][0]["score"] == 80 and "capped" not in detail["kpis"][0]
     edited = scoring.rescore_category(detail, {"A": 70})
     assert edited["kpis"][0]["score"] == 70 and "capped" not in edited["kpis"][0]
     assert edited["score"] == 35.0                            # (70 + 0) / 200 * 100
 
 
-def test_classification_reads_the_categories_and_skips_junk():
-    assert scoring.parse_categories({"categories": ["Social", "Environment"]}) == ["Environment", "Social"]
-    assert scoring.parse_categories({"categories": ["E", "g"]}) == ["Environment", "Governance"]
-    assert scoring.parse_categories({"categories": ["Finance", 7]}) == []
-    assert scoring.parse_categories({"categories": []}) == []
-    # None, not [] -- an unreadable answer must not silently skip the page
-    assert scoring.parse_categories({"other": 1}) is None
-    assert scoring.parse_categories("boom") is None
+def test_classification_reads_the_pillars_and_skips_junk():
+    """CLASSIFY_GUIDE section 17 returns primary_pillars and secondary_pillars; both are
+    read. The older "categories" field still reads, so stored results keep working."""
+    f = scoring.parse_categories
+    assert f({"primary_pillars": ["S"], "secondary_pillars": ["E"]}) == ["Environment", "Social"]
+    assert f({"primary_pillars": ["E", "g"], "secondary_pillars": []}) == ["Environment", "Governance"]
+    assert f({"categories": ["Social", "Environment"]}) == ["Environment", "Social"]
+    assert f({"primary_pillars": ["Finance", 7]}) == []
+    assert f({"primary_pillars": []}) == []
+    # None, not [] -- an unreadable answer is not the same as a page with no pillars
+    assert f({"other": 1}) is None
+    assert f("boom") is None
     prompt = scoring.classify_prompt("page {text} with 100% braces")
-    assert prompt.endswith("Page:\npage {text} with 100% braces") and '"categories"' in prompt
+    assert prompt.endswith("Page:\npage {text} with 100% braces")
+    assert "Every page remains available" in prompt
 
 
 def test_levels_and_labels():
@@ -76,10 +84,14 @@ def test_levels_and_labels():
     assert scoring.kpi_labels({"A": 32.0, "B": 80.5}, KPIS) == ["B (80.5)", "A (32)"]
 
 
-def test_prompt_guide_goes_before_the_text_and_survives_format():
+def test_prompt_guide_goes_before_the_text_and_keeps_its_braces():
+    """The guide carries the client's JSON examples, so the page text is substituted, never
+    str.format()ted -- formatting would read his braces as fields (app/esg/pipeline.py)."""
     prompt = scoring.with_score_guide("Score:\n1. A\n\nText:\n{text}")
-    assert prompt.format(text="x").endswith("Text:\nx")
-    assert '"kpi_scores"' in prompt and "81-100:" in prompt
+    assert prompt.replace("{text}", "x").endswith("Text:\nx")
+    assert '"kpi_findings"' in prompt and '"score_contribution"' in prompt
+    with pytest.raises(KeyError):
+        prompt.format(text="x")
 
 
 def test_the_guide_replaces_the_leftover_page_score_fields():
@@ -96,7 +108,7 @@ def test_the_guide_replaces_the_leftover_page_score_fields():
     assert "A Detailed explanation of the score" not in out
     assert "contributed positively" not in out
     assert '- "sector": The sector of the company.' in out        # untouched
-    assert '- "reason": One line for each point you scored' in out
+    assert '- "kpi_findings":' in out                              # the guide's own fields
     assert out.endswith("Text:\n{text}")
 
 
@@ -121,34 +133,32 @@ def _entries(*rows):
 def test_evidence_keeps_the_other_pages_that_scored_the_kpi():
     ev = scoring._evidence(_entries((85, 11, "down 22% vs a 2030 target"),
                                     (61, 52, "renewables at 31%"),
-                                    (40, 60, "policy only")), capped=False)
+                                    (40, 60, "policy only")))
     assert ev["page"] == 11 and ev["score"] == 85
     assert [a["page"] for a in ev["also"]] == [52, 60]
     assert ev["also"][0]["reason"] == "renewables at 31%"
 
 
-def test_evidence_of_a_capped_kpi_leads_with_the_poor_page():
-    """The score came from the poor page, so that is the reason; the good pages follow,
-    which is what explains a 20 sitting under a list of ten pages."""
-    ev = scoring._evidence(_entries((85, 11, "down 22%"), (15, 57, "missed the interim target")),
-                           capped=True)
-    assert (ev["page"], ev["score"]) == (57, 15)
-    assert ev["also"] == [{"page": 11, "score": 85, "reason": "down 22%"}]
+def test_evidence_leads_with_the_page_the_score_came_from():
+    """The strongest page sets the score, so it gives the reason; the weaker page follows
+    as supporting context rather than replacing it (SCORE_GUIDE section 5)."""
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (15, 57, "missed the interim target")))
+    assert (ev["page"], ev["score"]) == (11, 85)
+    assert ev["also"] == [{"page": 57, "score": 15, "reason": "missed the interim target"}]
 
 
 def test_evidence_keeps_at_most_two_supporting_pages():
-    ev = scoring._evidence(_entries(*[(90 - i, i, f"reason {i}") for i in range(1, 8)]), capped=False)
+    ev = scoring._evidence(_entries(*[(90 - i, i, f"reason {i}") for i in range(1, 8)]))
     assert len(ev["also"]) == scoring.EVIDENCE_ALSO == 2
 
 
 def test_evidence_skips_pages_the_answer_gave_no_reason_for():
-    ev = scoring._evidence(_entries((85, 11, "down 22%"), (61, 52, ""), (40, 60, "policy only")),
-                           capped=False)
+    ev = scoring._evidence(_entries((85, 11, "down 22%"), (61, 52, ""), (40, 60, "policy only")))
     assert [a["page"] for a in ev["also"]] == [60]
 
 
 def test_a_kpi_that_scored_nowhere_has_no_evidence():
-    assert scoring._evidence(_entries((0, 3, "only mentioned")), capped=False) == {}
+    assert scoring._evidence(_entries((0, 3, "only mentioned"))) == {}
 
 
 def test_category_detail_carries_the_evidence_onto_the_kpi_row():
@@ -202,3 +212,61 @@ def test_a_listed_reason_reaches_the_kpi_row_as_evidence():
     row = next(r for r in detail["kpis"] if r["kpi"] == "KPI 16")
     assert row["evidence"]["reason"] == "24 average training hours per employee"
     assert row["evidence"]["page"] == 12
+
+
+def test_every_kpi_is_sent_with_its_question_and_the_names_still_read_back(db):
+    """SCORE_GUIDE section 2 makes the Question the primary test, so it is sent with every
+    KPI -- on its own unnumbered line, because app/esg/pipeline.py reads the KPI names back
+    out of this prompt and the report keys every KPI, edit and reason on that exact name."""
+    for order, (sp, sp1, metric, question) in enumerate([
+        ("Emission", "Emissions I", "Emissions reduction policy", "Does the company have a policy?"),
+        ("Water", "Water II", "Water withdrawn", "Does the firm disclose water withdrawal?"),
+    ], 1):
+        db.esg_kpis.insert_one({"pillar": "E", "sub_pillar": sp, "sub_pillar_1": sp1,
+                                "metric": metric, "question": question, "order": order,
+                                "is_meta": False})
+    kpis = scoring.load_kpis("Environment")
+    text = scoring.kpi_list_text(kpis)
+
+    assert "    1. Emissions reduction policy\n       Question: Does the company have a policy?" in text
+    assert text.count("       Question: ") == 2
+    assert parse_kpi_list(text) == ["Emissions reduction policy", "Water withdrawn"]
+
+
+def test_the_scoring_guide_is_never_parsed_for_kpi_names():
+    """SCORE_GUIDE numbers its own sections, so a prompt that carries it must not be read
+    for KPI names -- "1. CORE PRINCIPLE" would become a KPI. pipeline.py parses the prompt
+    before the guide is added; this locks that in."""
+    listing = "Evaluate:\n1. Water withdrawn\n\nText:\n{text}"
+    assert parse_kpi_list(listing) == ["Water withdrawn"]
+    with_guide = scoring.with_score_guide(listing)
+    assert len(parse_kpi_list(with_guide)) > 1        # the guide's own numbered sections
+    assert "CORE PRINCIPLE" in parse_kpi_list(with_guide)
+
+
+def test_the_llm_provider_switches_between_openai_and_bedrock(monkeypatch):
+    """The same OpenAI models can be reached through Bedrock, which authenticates with the
+    AWS credential chain instead of an OpenAI key, so the usage bills to AWS."""
+    from app.core import llm_settings
+    from app.core.config import settings
+    from app.esg import llm as llm_mod
+
+    monkeypatch.setattr(settings, "esg_openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "esg_openai_model", "gpt-4.1-mini")
+    monkeypatch.setattr(settings, "esg_bedrock_model", "openai.gpt-5.6-luna")
+    monkeypatch.setattr(settings, "bedrock_region", "ap-south-1")
+
+    monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.OPENAI)
+    monkeypatch.setattr(llm_mod, "_llm", None)
+    direct = llm_mod.get_llm()
+    assert direct.provider == llm_settings.OPENAI and direct.model == "gpt-4.1-mini"
+    assert "api.openai.com" in str(direct.clients.base_url)
+
+    # Changing the provider rebuilds the shared instance rather than serving the old one,
+    # and sends the Bedrock model id rather than the OpenAI one.
+    monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.AWS)
+    viaws = llm_mod.get_llm()
+    assert viaws is not direct and viaws.provider == llm_settings.AWS
+    assert viaws.model == "openai.gpt-5.6-luna"
+    assert "api.openai.com" not in str(viaws.clients.base_url)
+    assert "ap-south-1" in str(viaws.clients.base_url)

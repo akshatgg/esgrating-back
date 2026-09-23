@@ -204,7 +204,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.141" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
-    { name = "openai", specifier = ">=1.40" },
+    { name = "openai", specifier = ">=3.11,<4" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "pymongo", extras = ["aws"], specifier = ">=4.8,<5" },
     { name = "pypdf", specifier = ">=6" },

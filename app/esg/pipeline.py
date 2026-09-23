@@ -1,13 +1,14 @@
 # Port of esg_score_calculator-master/utils/helper.py, line for line.
-# Divergences (approved): ast.literal_eval instead of eval (failures still skipped); the LLM
+# Divergences (approved): answers are parsed, not eval'd (failures still skipped); the LLM
 # comes from llm_mod.get_llm() (model from settings); inputs are (filename, bytes) tuples.
-# ast.literal_eval accepts and rejects exactly what eval did for this output (JSON's
-# true/false/null still skip the chunk), so scores match production; json.loads would not.
+# Answers were read with ast.literal_eval to accept and reject exactly what eval did,
+# including skipping any answer holding JSON's true/false/null. The client's prompts return
+# booleans (CLASSIFY_GUIDE s.17, SCORE_GUIDE s.30), which that rule threw away whole, so
+# they are read by app/core/answers.py: JSON first, Python literal second.
 # Added: prompts are checked before the fan-out so a missing esg_prompts doc fails the run
 # loudly (spec) instead of silently scoring that category 0; a run where every category
 # failed to score is neither stored nor cached (spec). check_old_composite_score is
 # dropped (unused in the original).
-import ast
 import concurrent.futures
 import hashlib
 import json
@@ -16,6 +17,7 @@ import re
 from collections import Counter
 from datetime import datetime
 
+from app.core.answers import parse_answer
 from app.core.kpis import page_sort_key, parse_kpi_list
 from app.esg import scoring
 from app.esg.scoring import composite_score, evaluate_score  # noqa: F401 (used by app.reports.editing)
@@ -52,7 +54,7 @@ def attach_page_kpis(esg_records):
     kpi_lists = {cat: prompt_kpis(scoring_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
     for r in esg_records:
         try:
-            parsed = ast.literal_eval(r["analysis"])  # parsed the way aggregate_scores parses it
+            parsed = parse_answer(r["analysis"])  # parsed the way aggregate_scores parses it
         except Exception:
             parsed = None
         kpis = kpi_lists.get(r["category"], [])
@@ -65,46 +67,13 @@ def attach_page_kpis(esg_records):
             r["review"] = note
 
 
-def classify_page(text):
-    """Step 0 (app/esg/scoring.py): the categories one page has ESG content about.
-
-    [] means the page has none and is not scored at all. None means the call or its answer
-    failed -- the caller then scores every category for that page, so a page is never
-    dropped because of a failed classification."""
-    try:
-        response = llm_mod.get_llm().generate_score(scoring.classify_prompt(text))
-        return scoring.parse_categories(ast.literal_eval(response))
-    except Exception as e:
-        logger.error(f"Page classification failed, scoring every category: {e}")
-        return None
-
-
-def classify_pages(texts):
-    """{index: [categories]} for the given page texts, all calls in flight together. A
-    page whose classification failed maps to every category."""
-    out = {}
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(classify_page, text): i for i, text in enumerate(texts)}
-        for future in concurrent.futures.as_completed(futures):
-            i = futures[future]
-            try:
-                cats = future.result()
-            except Exception as e:
-                logger.error(f"Page classification failed, scoring every category: {e}")
-                cats = None
-            out[i] = list(scoring.CATEGORIES) if cats is None else cats
-    counts = Counter(c for cats in out.values() for c in cats)
-    logger.info(f"Pages by category: {dict(counts)} of {len(texts)} pages")
-    return out
-
-
 def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
         prompt = scoring.with_score_guide(scoring_prompt(category))  # KPI scores 0-100 (app/esg/scoring.py)
-        prompt = prompt.format(
-            text=text
-        )
+        # Substituted, not .format()ted: SCORE_GUIDE carries the client's JSON examples, so
+        # the prompt contains braces that str.format would read as fields.
+        prompt = prompt.replace("{text}", text)
         response = llm_mod.get_llm().generate_score(prompt)
         return response, text
     except Exception as e:
@@ -168,7 +137,7 @@ def aggregate_scores(score_results,category):
     postive_keywords = []
     for result in score_results:
         try:
-            parsed_result = ast.literal_eval(result)
+            parsed_result = parse_answer(result)
             score = parsed_result.get("score", 0)
             sector = parsed_result.get("sector", "")
             industry = parsed_result.get("industry", "")
@@ -186,10 +155,11 @@ def aggregate_scores(score_results,category):
     most_common_sector = Counter(sectors).most_common(1)[0][0] if sectors else ""
     most_common_industry = Counter(industries).most_common(1)[0][0] if industries else ""
     most_common_keywords = select_keyword(category,postive_keywords)
-    most_common_keywords = ast.literal_eval(most_common_keywords)
-    logger.info(most_common_keywords["keywords"])
+    # An unreadable keyword answer costs the report its keyword chips, not the whole run.
+    chosen = (parse_answer(most_common_keywords) or {}).get("keywords") or []
+    logger.info(chosen)
 
-    return round_average(total_score, count), most_common_sector, most_common_industry, most_common_keywords["keywords"]
+    return round_average(total_score, count), most_common_sector, most_common_industry, chosen
 
 
 def analyze_chunk(chunk: str, category: str):
@@ -233,15 +203,15 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 read_prompt(category)  # fail loudly before any scoring if a prompt is missing
 
             text_chunks = split_text_into_chunks(processed_data, max_tokens=2000)
-            # Step 0: each chunk is scored only for the categories it has content about.
-            chunk_cats = classify_pages(text_chunks)
+            # No classification call here: chunks are not pages, so there is no page to
+            # attach the result to, and classification no longer decides what is scored
+            # (CLASSIFY_GUIDE sections 3 and 18). Every chunk goes to every pillar.
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
                     logger.info(f"Analyzing {category}...")
                     futures = [executor.submit(analyze_chunk, chunk, category)
-                               for i, chunk in enumerate(text_chunks)
-                               if category in chunk_cats.get(i, ())]
+                               for chunk in text_chunks]
                     for future in concurrent.futures.as_completed(futures):
                         try:
                             analysis, text = future.result()
@@ -270,18 +240,19 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             for category in scores:
                 read_prompt(category)  # fail loudly before any scoring if a prompt is missing
 
-            # Step 0: one call per page decides its categories; only those categories'
-            # KPIs are then matched against it (app/esg/scoring.py).
+            # No classification pass. CLASSIFY_GUIDE sections 3 and 18 forbid it deciding
+            # what is analysed -- "Every page remains available for KPI evidence
+            # evaluation" -- so every page with text goes to all three pillars, and a call
+            # whose answer changes nothing is one call and ~2,880 tokens per page for
+            # nothing (user, 2026-09-24). BFSI still classifies; it filters on the answer.
             pages_with_text = [p for p in processed_data if p.get("text", "").strip()]
-            page_cats = classify_pages([p["text"] for p in pages_with_text])
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
                     logger.info(f"Analyzing {category}...")
                     futures = [
                         executor.submit(analyze_chunk, page.get("text", ""), category)
-                        for i, page in enumerate(pages_with_text)
-                        if category in page_cats.get(i, ())
+                        for page in pages_with_text
                     ]
                     for future in concurrent.futures.as_completed(futures):
                         try:
@@ -296,7 +267,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                                     "text": text,
                                     "filename": filename,
                                     "page_no": page_no,
-                                    "category": category
+                                    "category": category,
                                 })
                                 scores[category].append(analysis)
                         except Exception as e:
@@ -331,6 +302,10 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
         # The same numbers, KPI by KPI, go into the report as its KPI Assessment.
         kpi_coverage = {}
         page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
+        # The company's sector, for the methodology's materiality weighting (Annexure A).
+        # The same value the report shows; an unrecognised one simply leaves every
+        # indicator at the default materiality.
+        sector = (final_scores.get("Environment") or {}).get("sector", "") or ""
         for category in scores:
             kpis = prompt_kpis(scoring_prompt(category))
             if not kpis:
@@ -340,12 +315,15 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 if rec.get("category") != category:
                     continue
                 try:
-                    parsed = ast.literal_eval(rec["analysis"])
+                    parsed = parse_answer(rec["analysis"])
                 except Exception:
                     continue
                 page_kpis = scoring.page_kpi_scores(parsed, kpis)
                 # The reason the scoring call gave for each KPI travels with its score.
-                entries.append((rec.get("page_no"), page_kpis, scoring.kpi_reasons(parsed, kpis)))
+                # The reason and the KIND of evidence both travel with the score: the kind
+                # is what the methodology's 8.3 indicator weighting is applied to.
+                entries.append((rec.get("page_no"), page_kpis, scoring.kpi_reasons(parsed, kpis),
+                                scoring.kpi_evidence_types(parsed, kpis)))
                 if isinstance(parsed, dict) and rec.get("page_no") is not None:
                     # Saved with the result for the Detailed Report's Page Scores and
                     # Scoring Rationale: the page's score (from its KPIs), its KPIs with
@@ -360,7 +338,12 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                         # Set when the answer's negative keywords disagree with its scores.
                         "review": scoring.contradiction(parsed, page_kpis),
                     }
-            detail = scoring.category_detail(entries, kpis)
+            # The library's taxonomy, so the indicators roll up the way the methodology
+            # says: Sub Pillar 1 is the Key Issue, Sub Pillar the Theme (8.2.7 steps 3-5).
+            meta = {k["metric"]: {"theme": k.get("sub_pillar", ""),
+                                  "key_issue": k.get("sub_pillar_1", "")}
+                    for k in scoring.load_kpis(category)}
+            detail = scoring.category_detail(entries, kpis, meta, sector)
             final_scores[category]["score"] = detail["score"]
             kpi_coverage[category] = detail
 

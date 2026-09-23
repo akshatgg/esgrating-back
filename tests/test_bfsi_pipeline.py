@@ -39,15 +39,16 @@ class FakeClient:
 
     def batch(self, prompts, concurrency=8):
         self.batches.append(dict(prompts))
-        if prompts and all('"categories"' in p for p in prompts.values()):
-            return {k: {"categories": list(self.categories)} for k in prompts}
+        if prompts and all("CFC ESG Page Classification" in p for p in prompts.values()):
+            return {k: {"primary_pillars": list(self.categories), "secondary_pillars": []}
+                    for k in prompts}
         return {k: self._responder(k, p) for k, p in prompts.items()}
 
     @property
     def scoring_batches(self):
         """The three category batches, without the step 0 classification batch."""
         return [b for b in self.batches
-                if not (b and all('"categories"' in p for p in b.values()))]
+                if not (b and all("CFC ESG Page Classification" in p for p in b.values()))]
 
     def json(self, user, system=""):
         self.json_calls.append((user, system))
@@ -209,24 +210,29 @@ Text:
     # scores are the marks, and "reason" and the keyword lists now explain those marks.
     assert '- "score": A number between 0 and 100.' not in first
     assert '- "reason": A Detailed explanation of the score.' not in first
-    assert '- "kpi_scores": A list of [point number, score] pairs' in first and "81-100:" in first
-    assert '- "reason": One line for each point you scored' in first
-    assert '- "positive_keywords": The words or short phrases from this text that earned' in first
-    assert '- "negative_keywords": The words or short phrases from this text that show poor' in first
+    # The scoring guide is the client's (app/esg/prompts/score_guide.txt), shared with ESG.
+    assert '- "kpi_findings":' in first and '"score_contribution"' in first
+    assert '"score_reason"' in first                 # his per-KPI reason, not a page reason
+    assert '- "positive_keywords": the words or short phrases from this page' in first
+    assert '- "negative_keywords": the words or short phrases from this page' in first
     assert "%1$s" not in first and "%2$s" not in first and "%3$s" not in first
     assert fake.scoring_batches[1][0].startswith("Analyze the following text for social performance.")
     assert fake.scoring_batches[2][0].startswith("Analyze the following text for governance performance.")
 
 
-def test_only_the_categories_a_unit_is_about_are_scored(monkeypatch):
-    """Step 0, the same as the ESG calculator: a unit is classified first and only that
-    category's KPIs are matched against it."""
+def test_every_unit_is_scored_against_all_three_categories(monkeypatch):
+    """CLASSIFY_GUIDE sections 3 and 18, the same as the ESG calculator: classification may
+    never keep a page out of KPI analysis, so there is no classification pass and every
+    unit goes to all three categories."""
     c = use(monkeypatch, FakeClient(categories=["Environment"]))
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert len(c.scoring_batches) == 1
-    assert all("environmental performance" in p for p in c.scoring_batches[0].values())
-    # UNIT scores point 1 = 90 and point 2 = 30 of the 18 built-in E criteria: 120 / 1800.
-    assert out["e_score"] == 6.67 and out["s_score"] == 0.0 and out["g_score"] == 0.0
+    assert len(c.scoring_batches) == 3
+    kinds = [next(iter(b.values())) for b in c.scoring_batches]
+    assert sum("environmental performance" in p for p in kinds) == 1
+    assert sum("social performance" in p for p in kinds) == 1
+    assert sum("governance performance" in p for p in kinds) == 1
+    # Every category is scored now, not only the classified one.
+    assert out["e_score"] > 0 and out["s_score"] > 0 and out["g_score"] > 0
     assert out["scoring_method"] == "kpi_score"
 
 

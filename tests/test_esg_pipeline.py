@@ -5,6 +5,7 @@ from bson import ObjectId
 
 from app.esg import llm as llm_mod
 from app.esg import pipeline, store
+from app.core.kpis import parse_kpi_list
 from app.esg.extract import process_files
 from tests.conftest import FakeLLM
 from tests.fixtures.make_pdf import make_pdf
@@ -62,14 +63,24 @@ def test_prompt_kpis_reads_only_the_numbered_list():
 
 
 class KpiFakeLLM(FakeLLM):
-    """Scoring answers that also score the KPIs the page addresses (0-100): point 2 at 80,
-    point 1 at 32 (as a string number), and an out-of-range 9 that must be dropped."""
+    """Scoring answers in the client's section 30 shape: one finding per KPI the page
+    evidences, carrying the KPI's own metric and its score_contribution. The second KPI
+    scores 80, the first 32 (as a string number), and a metric that is not in the library
+    must be dropped."""
 
     def generate_score(self, text):
         out = super().generate_score(text)
-        if '"kpi_scores"' in text:
+        if '"kpi_findings"' in text:
+            kpis = parse_kpi_list(text)
+            findings = [{"metric": "Not In The Library", "score_contribution": 50}]
+            if len(kpis) > 1:
+                findings.append({"metric": kpis[1], "score_contribution": 80,
+                                 "score_reason": f"{kpis[1]}: measured performance disclosed."})
+            if kpis:
+                findings.append({"metric": kpis[0], "score_contribution": "32",
+                                 "score_reason": f"{kpis[0]}: policy only, no results."})
             answer = json.loads(out)
-            answer.update({"kpi_scores": [[2, 80], [9, 50], ["1", "32"]]})
+            answer.update({"kpi_findings": findings})
             return json.dumps(answer)
         return out
 
@@ -88,9 +99,10 @@ def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monk
     # One call per page and category -- the scoring call itself scores the KPIs, with the
     # scoring guide -- plus the three keyword-ranking calls. No separate KPI call.
     scoring_calls = [c for c in fake.calls if "score this" in c]
-    assert len(scoring_calls) == 6 and all('"kpi_scores"' in c and "81-100:" in c for c in scoring_calls)
-    # 2 classification calls (one per page, step 0) + 6 scoring + 3 keyword-ranking.
-    assert len(fake.calls) == 2 + 6 + 3
+    assert len(scoring_calls) == 6
+    assert all('"kpi_findings"' in c and '"score_contribution"' in c for c in scoring_calls)
+    # No classification pass any more: 6 scoring + 3 keyword-ranking.
+    assert len(fake.calls) == 6 + 3
     # Category = best KPI scores as a % of the maximum: (32 + 80) / 200 -> 56, whatever the
     # AI's own page score (90 / 60 / 50) was.
     assert final["environmental_score"] == 56 and final["social_score"] == 56 and final["governance_score"] == 56
@@ -109,30 +121,45 @@ def test_one_scoring_call_scores_kpis_and_category_uses_best_kpi_scores(db, monk
     assert all(r["page_score"] == 56 for r in pages)
 
 
-def test_only_the_categories_a_page_is_about_are_scored(db, monkeypatch):
-    """Step 0: the page is placed in a category first, and only that category's KPIs are
-    matched against it -- no Social or Governance call for a page about the environment."""
+def test_classification_never_keeps_a_page_out_of_scoring(db, monkeypatch):
+    """CLASSIFY_GUIDE sections 3 and 18: "Never allow page classification to suppress a page
+    from the full evidence analysis". The page classifies as Environment only, and is still
+    scored against Social and Governance."""
     _kpi_prompts(db)
     fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50}, categories=["Environment"])
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
     final = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["p1 text", "p2 text"]))], cid, "2024-2025")
     scoring_calls = [c for c in fake.calls if "score this" in c]
-    assert len(scoring_calls) == 2 and all("[Environment]" in c for c in scoring_calls)
+    # 2 pages x 3 pillars, not 2 pages x 1 classified pillar.
+    assert len(scoring_calls) == 6
+    assert {cat for cat in ("Environment", "Social", "Governance")
+            if any(f"[{cat}]" in c for c in scoring_calls)} == {"Environment", "Social", "Governance"}
     assert final["environmental_score"] == 56
-    assert final["social_score"] == 0 and final["governance_score"] == 0
-    # Social and Governance were never asked, so their KPIs are all "not found" = 0.
-    assert [k["score"] for k in final["kpi_coverage"]["Social"]["kpis"]] == [0.0, 0.0]
+    assert final["social_score"] == 56 and final["governance_score"] == 56
 
 
-def test_a_document_with_no_esg_content_is_not_scored(db, monkeypatch):
+def test_a_document_that_evidences_no_kpi_at_all_is_not_scored(db, monkeypatch):
+    """Every page is now scored whatever it classifies as, so the guard is on the result:
+    a document where no page evidenced a single KPI is refused rather than issued as a D."""
     _kpi_prompts(db)
-    fake = KpiFakeLLM({"Environment": 90, "Social": 60, "Governance": 50}, categories=[])
+
+    class NoFindings(KpiFakeLLM):
+        def generate_score(self, text):
+            if '"kpi_findings"' in text:
+                self.calls.append(text)
+                return json.dumps({"kpi_findings": [], "positive_keywords": [],
+                                   "negative_keywords": [], "sector": "Unknown",
+                                   "industry": "Unknown"})
+            return super().generate_score(text)
+
+    fake = NoFindings({"Environment": 90, "Social": 60, "Governance": 50}, categories=[])
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     cid = store.insert_user("A", "a@x.com", "A", "9876543210", ["r.pdf"])
     out = pipeline.calculate_esg_score_concurrent([("r.pdf", make_pdf(["cover page"]))], cid, "2024-2025")
     assert out["status"] == "error" and "no page of this document" in out["message"]
-    assert [c for c in fake.calls if "score this" in c] == []
+    # The pages were still sent for scoring -- nothing was suppressed.
+    assert len([c for c in fake.calls if "score this" in c]) == 3
     assert db.esg_report.count_documents({}) == 0 and db.esg_hashes.count_documents({}) == 0
 
 
@@ -254,18 +281,21 @@ def test_aggregate_skips_unparseable_results(db, monkeypatch):
     assert fake.calls[-1] == expected
 
 
-def test_parser_matches_eval_accept_reject(db, monkeypatch):
-    """ast.literal_eval, not json.loads: same accept/reject set as the original eval()."""
+def test_the_parser_reads_json_booleans_and_python_reprs(db, monkeypatch):
+    """Both shapes are read (app/core/answers.py).
+
+    The port originally used ast.literal_eval so that an answer holding JSON's true, false
+    or null was dropped, exactly as the PHP eval() dropped it. The client's prompts require
+    those booleans -- CLASSIFY_GUIDE section 17 and SCORE_GUIDE section 30 both return
+    them -- so under that rule every classification and every KPI score was thrown away.
+    JSON is read first now, and a Python repr, which older stored answers hold, still is."""
     fake = FakeLLM({})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     base = {"sector": "energy", "industry": "power", "positive_keywords": []}
-    # eval() raised NameError on JSON true/false/null, so the page was dropped. It must
-    # still be dropped -- json.loads would have counted it.
-    literals = json.dumps({"score": 10, "verified": True, "note": None, **base})
-    # eval() accepted Python repr output (single quotes); json.loads would reject it.
+    with_booleans = json.dumps({"score": 10, "verified": True, "note": None, **base})
     py_repr = repr({"score": 90, **base})
-    avg, _, _, _ = pipeline.aggregate_scores([literals, py_repr], "Environment")
-    assert avg == 90
+    avg, _, _, _ = pipeline.aggregate_scores([with_booleans, py_repr], "Environment")
+    assert avg == 50  # both pages counted now, not only the Python one
 
 
 def test_all_scoring_failed_is_not_stored_or_cached(db, prompts, monkeypatch):
@@ -360,21 +390,26 @@ def test_scoring_uses_esg_kpis_with_sub_pillar_context(db, monkeypatch):
 
 
 class ReasoningFakeLLM(FakeLLM):
-    """Answers the way SCORE_GUIDE asks a real scoring call to: KPI scores plus one
-    reason line per KPI, "<point> <score>: <what the page showed>". Page 1 proves both
-    KPIs well, page 2 shows poor performance on point 1."""
+    """Answers the way SCORE_GUIDE section 30 asks a real scoring call to: one finding per
+    KPI, each with its metric, score_contribution and score_reason. Page 1 evidences both
+    KPIs well, page 2 shows poor performance on the first."""
 
     def generate_score(self, text):
         out = super().generate_score(text)
-        if '"kpi_scores"' not in text:
+        if '"kpi_findings"' not in text:
             return out
+        kpis = parse_kpi_list(text)
         answer = json.loads(out)
         if "p2 text" in text:
-            answer.update({"kpi_scores": [[1, 15]],
-                           "reason": "1 15: fined for a discharge breach, emissions up 4%"})
+            answer["kpi_findings"] = [
+                {"metric": kpis[0], "score_contribution": 15,
+                 "score_reason": "fined for a discharge breach, emissions up 4%"}]
         else:
-            answer.update({"kpi_scores": [[1, 85], [2, 61]],
-                           "reason": "1 85: cut 22% against a 2030 target\n2 61: recycling at 31%"})
+            answer["kpi_findings"] = [
+                {"metric": kpis[0], "score_contribution": 85,
+                 "score_reason": "cut 22% against a 2030 target"},
+                {"metric": kpis[1], "score_contribution": 61,
+                 "score_reason": "recycling at 31%"}]
         return json.dumps(answer)
 
 
@@ -390,12 +425,13 @@ def test_a_fresh_analysis_carries_the_reason_for_every_scored_kpi(db, monkeypatc
     assert final["scoring_method"] == "kpi_score"
     kpis = {k["kpi"]: k for k in final["kpi_coverage"]["Environment"]["kpis"]}
 
-    # Point 1 scored 85 on one page and 15 on another: held at 20, and the reason leads
-    # with the page that held it there, with the strong page kept beside it.
+    # The first KPI contributed 85 on one page and 15 on another. SCORE_GUIDE section 5
+    # keeps the strongest, so it scores 85 and leads with that page's reason; the weaker
+    # page stays beside it rather than pulling the score down.
     held = kpis["Environment A"]
-    assert held["score"] == 20 and held["capped"] is True
-    assert held["evidence"]["reason"] == "fined for a discharge breach, emissions up 4%"
-    assert held["evidence"]["also"][0]["reason"] == "cut 22% against a 2030 target"
+    assert held["score"] == 85 and "capped" not in held
+    assert held["evidence"]["reason"] == "cut 22% against a 2030 target"
+    assert held["evidence"]["also"][0]["reason"] == "fined for a discharge breach, emissions up 4%"
 
     # A KPI scored on one page only keeps that page's reason and has nothing beside it.
     plain = kpis["Environment B"]

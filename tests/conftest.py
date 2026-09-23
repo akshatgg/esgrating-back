@@ -23,6 +23,18 @@ def no_openai_keys(monkeypatch):
     monkeypatch.setattr(settings, "bfsi_openai_api_key", "")
 
 
+@pytest.fixture(autouse=True)
+def openai_provider(monkeypatch):
+    """Tests run against the OpenAI provider whatever the machine's AWS credentials are.
+
+    The shipped default is AWS (app/core/llm_settings.py), and resolve() would return it on
+    any developer machine with a profile -- which would send every test through the Bedrock
+    model id and make the suite depend on whose laptop it runs on. A test that wants AWS
+    asks for it."""
+    from app.core import llm_settings
+    monkeypatch.setattr(llm_settings, "resolve", lambda: llm_settings.OPENAI)
+
+
 @pytest.fixture
 def db():
     database = mongomock.MongoClient()["esg_score_calculator"]
@@ -56,8 +68,10 @@ def admin_client(client, db):
 class FakeLLM:
     """Scores by category keyword in the prompt; keyword selection returns first 5.
 
-    Step 0 (classification) answers with `categories` -- every category unless a test
-    passes its own list, so a page is scored for exactly those categories.
+    Step 0 (classification) answers in the client's CLASSIFY_GUIDE shape, with
+    `primary_pillars` -- every pillar unless a test passes its own list. Classification no
+    longer decides what is scored (his sections 3 and 18), so this only sets what the page
+    record reports.
     """
     def __init__(self, scores, categories=("Environment", "Social", "Governance")):
         self.scores, self.calls = scores, []
@@ -67,8 +81,10 @@ class FakeLLM:
         self.calls.append(text)
         if "STRICTLY SELECT THE TOP 5 KEYWORDS" in text:
             return json.dumps({"keywords": ["k1", "k2", "k3", "k4", "k5"]})
-        if '"categories"' in text:
-            return json.dumps({"categories": self.categories})
+        if "CFC ESG Page Classification" in text:
+            return json.dumps({"primary_pillars": self.categories, "secondary_pillars": [],
+                               "relevance": "Substantive ESG", "themes": [],
+                               "classification_reason": "fake"})
         for cat, score in self.scores.items():
             if f"[{cat}]" in text:
                 return json.dumps({"reason": "r", "score": score, "positive_keywords": ["k1", "k2"],
