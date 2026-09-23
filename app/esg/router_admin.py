@@ -1,5 +1,4 @@
 # app/esg/router_admin.py
-import ast
 import csv
 import io
 import math
@@ -11,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from app.core.answers import parse_answer
 from app.auth.deps import require_admin
 from app.core.config import settings
 from app.core.errors import UserError
@@ -318,12 +318,12 @@ def legacy_export_csv(company_id: str, submission_id: str | None = None,
     for doc in documents:
         for analysis in doc.get("analysis", []):
             try:
-                # Divergence (approved): ast.literal_eval, not eval() (app.py:193-194) or
+                # Divergence (approved): parsed, not eval() (app.py:193-194) or
                 # json.loads -- same parser pipeline.py uses, so True/False/None LLM output
                 # still drops the row exactly as eval() did.
-                analysis_data = ast.literal_eval(analysis) if isinstance(analysis, str) else analysis
+                analysis_data = parse_answer(analysis)
                 raw_reason = analysis_data.get("analysis")
-                analysis_reason = ast.literal_eval(raw_reason) if isinstance(raw_reason, str) else raw_reason
+                analysis_reason = parse_answer(raw_reason)
                 rows.append([
                     analysis_data.get("filename", ""),
                     analysis_data.get("category", ""),

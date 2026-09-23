@@ -1,13 +1,14 @@
 # Port of esg_score_calculator-master/utils/helper.py, line for line.
-# Divergences (approved): ast.literal_eval instead of eval (failures still skipped); the LLM
+# Divergences (approved): answers are parsed, not eval'd (failures still skipped); the LLM
 # comes from llm_mod.get_llm() (model from settings); inputs are (filename, bytes) tuples.
-# ast.literal_eval accepts and rejects exactly what eval did for this output (JSON's
-# true/false/null still skip the chunk), so scores match production; json.loads would not.
+# Answers were read with ast.literal_eval to accept and reject exactly what eval did,
+# including skipping any answer holding JSON's true/false/null. The client's prompts return
+# booleans (CLASSIFY_GUIDE s.17, SCORE_GUIDE s.30), which that rule threw away whole, so
+# they are read by app/core/answers.py: JSON first, Python literal second.
 # Added: prompts are checked before the fan-out so a missing esg_prompts doc fails the run
 # loudly (spec) instead of silently scoring that category 0; a run where every category
 # failed to score is neither stored nor cached (spec). check_old_composite_score is
 # dropped (unused in the original).
-import ast
 import concurrent.futures
 import hashlib
 import json
@@ -16,6 +17,7 @@ import re
 from collections import Counter
 from datetime import datetime
 
+from app.core.answers import parse_answer
 from app.core.kpis import page_sort_key, parse_kpi_list
 from app.esg import scoring
 from app.esg.scoring import composite_score, evaluate_score  # noqa: F401 (used by app.reports.editing)
@@ -52,7 +54,7 @@ def attach_page_kpis(esg_records):
     kpi_lists = {cat: prompt_kpis(scoring_prompt(cat)) for cat in ("Environment", "Social", "Governance")}
     for r in esg_records:
         try:
-            parsed = ast.literal_eval(r["analysis"])  # parsed the way aggregate_scores parses it
+            parsed = parse_answer(r["analysis"])  # parsed the way aggregate_scores parses it
         except Exception:
             parsed = None
         kpis = kpi_lists.get(r["category"], [])
@@ -73,7 +75,7 @@ def classify_page(text):
     dropped because of a failed classification."""
     try:
         response = llm_mod.get_llm().generate_score(scoring.classify_prompt(text))
-        return scoring.parse_categories(ast.literal_eval(response))
+        return scoring.parse_categories(parse_answer(response))
     except Exception as e:
         logger.error(f"Page classification failed, scoring every category: {e}")
         return None
@@ -168,7 +170,7 @@ def aggregate_scores(score_results,category):
     postive_keywords = []
     for result in score_results:
         try:
-            parsed_result = ast.literal_eval(result)
+            parsed_result = parse_answer(result)
             score = parsed_result.get("score", 0)
             sector = parsed_result.get("sector", "")
             industry = parsed_result.get("industry", "")
@@ -186,10 +188,11 @@ def aggregate_scores(score_results,category):
     most_common_sector = Counter(sectors).most_common(1)[0][0] if sectors else ""
     most_common_industry = Counter(industries).most_common(1)[0][0] if industries else ""
     most_common_keywords = select_keyword(category,postive_keywords)
-    most_common_keywords = ast.literal_eval(most_common_keywords)
-    logger.info(most_common_keywords["keywords"])
+    # An unreadable keyword answer costs the report its keyword chips, not the whole run.
+    chosen = (parse_answer(most_common_keywords) or {}).get("keywords") or []
+    logger.info(chosen)
 
-    return round_average(total_score, count), most_common_sector, most_common_industry, most_common_keywords["keywords"]
+    return round_average(total_score, count), most_common_sector, most_common_industry, chosen
 
 
 def analyze_chunk(chunk: str, category: str):
@@ -355,7 +358,7 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 if rec.get("category") != category:
                     continue
                 try:
-                    parsed = ast.literal_eval(rec["analysis"])
+                    parsed = parse_answer(rec["analysis"])
                 except Exception:
                     continue
                 page_kpis = scoring.page_kpi_scores(parsed, kpis)

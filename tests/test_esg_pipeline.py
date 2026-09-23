@@ -281,18 +281,21 @@ def test_aggregate_skips_unparseable_results(db, monkeypatch):
     assert fake.calls[-1] == expected
 
 
-def test_parser_matches_eval_accept_reject(db, monkeypatch):
-    """ast.literal_eval, not json.loads: same accept/reject set as the original eval()."""
+def test_the_parser_reads_json_booleans_and_python_reprs(db, monkeypatch):
+    """Both shapes are read (app/core/answers.py).
+
+    The port originally used ast.literal_eval so that an answer holding JSON's true, false
+    or null was dropped, exactly as the PHP eval() dropped it. The client's prompts require
+    those booleans -- CLASSIFY_GUIDE section 17 and SCORE_GUIDE section 30 both return
+    them -- so under that rule every classification and every KPI score was thrown away.
+    JSON is read first now, and a Python repr, which older stored answers hold, still is."""
     fake = FakeLLM({})
     monkeypatch.setattr(llm_mod, "get_llm", lambda: fake)
     base = {"sector": "energy", "industry": "power", "positive_keywords": []}
-    # eval() raised NameError on JSON true/false/null, so the page was dropped. It must
-    # still be dropped -- json.loads would have counted it.
-    literals = json.dumps({"score": 10, "verified": True, "note": None, **base})
-    # eval() accepted Python repr output (single quotes); json.loads would reject it.
+    with_booleans = json.dumps({"score": 10, "verified": True, "note": None, **base})
     py_repr = repr({"score": 90, **base})
-    avg, _, _, _ = pipeline.aggregate_scores([literals, py_repr], "Environment")
-    assert avg == 90
+    avg, _, _, _ = pipeline.aggregate_scores([with_booleans, py_repr], "Environment")
+    assert avg == 50  # both pages counted now, not only the Python one
 
 
 def test_all_scoring_failed_is_not_stored_or_cached(db, prompts, monkeypatch):
