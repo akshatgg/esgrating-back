@@ -1,14 +1,20 @@
 """Import the ESG metrics spreadsheet into the esg_kpis collection.
 
 The workbook has one tab per pillar (E, S, G) with the columns
-Pillar | Sub Pillar | Sub Pillar 1 | Metric. Pillar and Sub Pillar are written once per
-block (merged-looking cells), so they are carried down to the rows below. The last row
-of each tab holds the tab's metric count, which is checked against the rows read.
+Pillar | Sub Pillar | Sub Pillar 1 | Metric | Question. Pillar and Sub Pillar are written
+once per block (merged-looking cells), so they are carried down to the rows below. The last
+row of each tab holds the tab's metric count -- in the Question column -- which is checked
+against the rows read.
+
+The Question is what the metric asks of the report; the metric name is only a label. It is
+the test a KPI is scored against, so every scorable metric must have one.
 
 One document per metric:
     {pillar: "E", pillar_name: "Environment", sub_pillar: "Water", sub_pillar_order: 7,
-     sub_pillar_1: "Water II", metric: "Water withdrawn", order: 112, is_meta: false,
-     source: {sheet: "E", row: 114, metric_raw: "Water withdrawn"}, imported_at: ...}
+     sub_pillar_1: "Water II", metric: "Water withdrawn",
+     question: "Does the firm disclose its total water withdrawal?", order: 112,
+     is_meta: false, source: {sheet: "E", row: 114, metric_raw: "Water withdrawn",
+     question_raw: "Does the firm disclose its total water withdrawal? "}, imported_at: ...}
 
 order is the metric's position within its pillar, in sheet order. is_meta marks rows under
 a "Meta" sub pillar (company facts such as contact details, not scorable metrics).
@@ -29,7 +35,7 @@ from app.core.db import get_db
 
 COLLECTION = "esg_kpis"
 PILLAR_NAMES = {"E": "Environment", "S": "Social", "G": "Governance"}
-HEADER = ["Pillar", "Sub Pillar", "Sub Pillar 1", "Metric"]
+HEADER = ["Pillar", "Sub Pillar", "Sub Pillar 1", "Metric", "Question"]
 _WS = re.compile(r"\s+")
 
 
@@ -47,7 +53,7 @@ def read_workbook(path: str) -> tuple[list[dict], list[str]]:
         if code not in wb.sheetnames:
             raise SystemExit(f"tab {code!r} is missing (tabs: {wb.sheetnames})")
         ws = wb[code]
-        header = [_clean(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))[:4]]
+        header = [_clean(c) for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))[:5]]
         if header != HEADER:
             raise SystemExit(f"tab {code}: unexpected header {header}")
 
@@ -56,11 +62,14 @@ def read_workbook(path: str) -> tuple[list[dict], list[str]]:
         stated_total = None
         rows = []
         for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            cells = list(row) + [None] * 4
-            p, sp, sp1, metric = (_clean(c) for c in cells[:4])
-            extras = [(col, v) for col, v in enumerate(cells[4:], start=5) if v not in (None, "")]
-            if not (p or sp or sp1 or metric) and len(extras) == 1 and isinstance(extras[0][1], (int, float)):
-                stated_total = int(extras[0][1])  # the tab's count row, beside the metric column
+            cells = list(row) + [None] * 5
+            p, sp, sp1, metric, question = (_clean(c) for c in cells[:5])
+            extras = [(col, v) for col, v in enumerate(cells[5:], start=6) if v not in (None, "")]
+            # The tab's count row puts its number in the Question column, so it is found by
+            # shape -- nothing but a number in column 5 -- not by scanning stray columns. (E
+            # also carries a loose grand total in column 7, which must stay a note.)
+            if not (p or sp or sp1 or metric) and isinstance(cells[4], (int, float)):
+                stated_total = int(cells[4])
                 continue
             for col, extra in extras:
                 notes.append(f"{code} row {row_no} column {col}: value {extra!r} not imported")
@@ -84,10 +93,21 @@ def read_workbook(path: str) -> tuple[list[dict], list[str]]:
                 "sub_pillar_order": sub_order[sub_pillar],
                 "sub_pillar_1": sp1,
                 "metric": metric,
+                # What the metric actually asks of the report -- the metric name is only a
+                # label. This is the test a KPI is scored against (CFC ESG Rating Methodology
+                # v1.0 8.4: each indicator is scored 0-100 on what that indicator requires).
+                "question": question,
                 "order": len(rows) + 1,
                 "is_meta": sub_pillar == "Meta" or sp1 == "Meta",
-                "source": {"sheet": code, "row": row_no, "metric_raw": str(cells[3])},
+                "source": {"sheet": code, "row": row_no, "metric_raw": str(cells[3]),
+                           "question_raw": str(cells[4])},
             })
+        # A scorable metric with no Question cannot be scored against anything, so an
+        # incomplete workbook fails here rather than importing silently.
+        missing = [r["metric"] for r in rows if not r["question"] and not r["is_meta"]]
+        if missing:
+            raise SystemExit(f"tab {code}: {len(missing)} metrics have no Question, "
+                             f"first {missing[0]!r}")
         if stated_total is None:
             raise SystemExit(f"tab {code}: count row not found")
         if stated_total != len(rows):
