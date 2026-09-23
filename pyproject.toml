@@ -10,7 +10,11 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "openai>=1.40",
     "pydantic-settings>=2.15.0",
-    "pymongo>=4.8,<5",
+    # The [aws] extra (pymongo-auth-aws + boto3) is what makes authMechanism=MONGODB-AWS
+    # work: Atlas authenticates the api container as the IAM user ezrating-atlas-prod
+    # instead of a database password. Credentials arrive as AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY in api.env, written from SSM by deploy/deploy.sh.
+    "pymongo[aws]>=4.8,<5",
     # BFSI keeps pypdf (its original PHP port used Smalot\PdfParser; pypdf is the Python
     # equivalent). This is a separate package from PyPDF2 below -- no conflict.
     "pypdf>=6",
