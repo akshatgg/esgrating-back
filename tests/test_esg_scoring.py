@@ -242,3 +242,31 @@ def test_the_scoring_guide_is_never_parsed_for_kpi_names():
     with_guide = scoring.with_score_guide(listing)
     assert len(parse_kpi_list(with_guide)) > 1        # the guide's own numbered sections
     assert "CORE PRINCIPLE" in parse_kpi_list(with_guide)
+
+
+def test_the_llm_provider_switches_between_openai_and_bedrock(monkeypatch):
+    """The same OpenAI models can be reached through Bedrock, which authenticates with the
+    AWS credential chain instead of an OpenAI key, so the usage bills to AWS."""
+    from app.core import llm_settings
+    from app.core.config import settings
+    from app.esg import llm as llm_mod
+
+    monkeypatch.setattr(settings, "esg_openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "esg_openai_model", "gpt-4.1-mini")
+    monkeypatch.setattr(settings, "esg_bedrock_model", "openai.gpt-5.6-luna")
+    monkeypatch.setattr(settings, "bedrock_region", "ap-south-1")
+
+    monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.OPENAI)
+    monkeypatch.setattr(llm_mod, "_llm", None)
+    direct = llm_mod.get_llm()
+    assert direct.provider == llm_settings.OPENAI and direct.model == "gpt-4.1-mini"
+    assert "api.openai.com" in str(direct.clients.base_url)
+
+    # Changing the provider rebuilds the shared instance rather than serving the old one,
+    # and sends the Bedrock model id rather than the OpenAI one.
+    monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.AWS)
+    viaws = llm_mod.get_llm()
+    assert viaws is not direct and viaws.provider == llm_settings.AWS
+    assert viaws.model == "openai.gpt-5.6-luna"
+    assert "api.openai.com" not in str(viaws.clients.base_url)
+    assert "ap-south-1" in str(viaws.clients.base_url)

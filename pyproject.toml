@@ -8,7 +8,9 @@ dependencies = [
     "fastapi>=0.141",
     "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
-    "openai>=1.40",
+    # >=3 for openai.providers.bedrock, which is how the same OpenAI models are
+    # reached through Amazon Bedrock (app/esg/llm.py).
+    "openai>=3.11,<4",
     "pydantic-settings>=2.15.0",
     # The [aws] extra (pymongo-auth-aws + boto3) is what makes authMechanism=MONGODB-AWS
     # work: Atlas authenticates the api container as the IAM user ezrating-atlas-prod

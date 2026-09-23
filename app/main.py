@@ -15,6 +15,7 @@ from app.blog.store import ensure_indexes as ensure_blog_indexes
 from app.contact.router import router as contact_router
 from app.core.config import settings
 from app.dashboard.router import router as dashboard_router
+from app.settings_admin.router import router as settings_admin_router
 from app.core.errors import UserError
 from app.core.jobs import reset_interrupted_jobs
 from app.core.mail import MailError
@@ -86,6 +87,7 @@ app.include_router(ratings_public_router)
 app.include_router(ratings_admin_router)
 app.include_router(contact_router)
 app.include_router(dashboard_router)
+app.include_router(settings_admin_router)
 app.include_router(reports_router)
 app.include_router(blog_public_router)
 app.include_router(blog_admin_router)

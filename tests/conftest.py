@@ -23,6 +23,18 @@ def no_openai_keys(monkeypatch):
     monkeypatch.setattr(settings, "bfsi_openai_api_key", "")
 
 
+@pytest.fixture(autouse=True)
+def openai_provider(monkeypatch):
+    """Tests run against the OpenAI provider whatever the machine's AWS credentials are.
+
+    The shipped default is AWS (app/core/llm_settings.py), and resolve() would return it on
+    any developer machine with a profile -- which would send every test through the Bedrock
+    model id and make the suite depend on whose laptop it runs on. A test that wants AWS
+    asks for it."""
+    from app.core import llm_settings
+    monkeypatch.setattr(llm_settings, "resolve", lambda: llm_settings.OPENAI)
+
+
 @pytest.fixture
 def db():
     database = mongomock.MongoClient()["esg_score_calculator"]

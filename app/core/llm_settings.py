@@ -1,0 +1,87 @@
+"""Which account the AI usage is billed to, set by an admin and shared by both calculators.
+
+"aws" sends the same OpenAI models through Amazon Bedrock, authenticating with the AWS
+credential chain -- the IAM keys deploy.sh already writes into the container -- so no
+OpenAI key is involved and the usage draws on AWS. "openai" calls the OpenAI API directly
+with the configured key.
+
+It is a database setting rather than an environment variable so an admin can move the
+billing without a deploy, and it is read on every call so the change takes effect on the
+next analysis rather than the next restart.
+
+The default is "aws" (user, 2026-09-24). A deployment that has no AWS credentials and no
+setting stored would then fail every call, so resolve() falls back to "openai" when the
+AWS credential chain is empty -- a missing credential is a configuration problem, not a
+reason to stop rating.
+"""
+import logging
+
+from app.core.db import get_db
+from app.core.errors import UserError
+
+logger = logging.getLogger(__name__)
+
+COLLECTION = "app_settings"
+KEY = "llm_provider"
+
+AWS = "aws"
+OPENAI = "openai"
+PROVIDERS = (AWS, OPENAI)
+DEFAULT = AWS
+
+LABELS = {
+    AWS: "AWS (Amazon Bedrock)",
+    OPENAI: "OpenAI",
+}
+
+
+def stored() -> str | None:
+    """The provider an admin chose, or None when none has been chosen."""
+    doc = get_db()[COLLECTION].find_one({"key": KEY})
+    value = (doc or {}).get("value")
+    return value if value in PROVIDERS else None
+
+
+def provider() -> str:
+    """The configured provider, defaulting to AWS."""
+    return stored() or DEFAULT
+
+
+def set_provider(value: str, admin: str = "") -> str:
+    """Store the provider an admin picked. Raises UserError on anything else."""
+    value = (value or "").strip().lower()
+    if value not in PROVIDERS:
+        raise UserError(f"Provider must be one of: {', '.join(PROVIDERS)}.")
+    from datetime import datetime, timezone
+    get_db()[COLLECTION].update_one(
+        {"key": KEY},
+        {"$set": {"value": value, "updated_at": datetime.now(timezone.utc), "updated_by": admin}},
+        upsert=True,
+    )
+    logger.info("llm provider set to %s by %s", value, admin or "?")
+    return value
+
+
+def aws_credentials_available() -> bool:
+    """Whether the AWS credential chain can produce credentials here. False on a machine
+    with no role, no keys and no profile -- where every Bedrock call would fail."""
+    try:
+        import boto3
+
+        return boto3.Session().get_credentials() is not None
+    except Exception:
+        return False
+
+
+def resolve() -> str:
+    """The provider to actually use for a call.
+
+    AWS unless it was turned off, or unless this machine has no AWS credentials at all, in
+    which case OpenAI is used and the reason is logged. Never raises: a call has to go
+    somewhere."""
+    chosen = provider()
+    if chosen == AWS and not aws_credentials_available():
+        logger.error("llm provider is 'aws' but no AWS credentials are available; "
+                     "falling back to the OpenAI API for this call")
+        return OPENAI
+    return chosen
