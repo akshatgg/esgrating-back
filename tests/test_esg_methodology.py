@@ -224,3 +224,43 @@ def test_no_safeguard_leaves_the_grade_alone():
     assert cap is None and reasons == []
     assert m.capped_grade("A+", None) == "A+"
     assert m.safeguard_cap(["not a safeguard"]) == (None, [])
+
+
+# --- the wiring: category_detail scores by the methodology when the library is there -----
+
+def test_category_detail_scores_by_the_methodology_when_the_taxonomy_is_known():
+    """With the KPI library's Theme and Key Issue, a pillar is the weighted roll-up rather
+    than the flat average -- and the flat average is kept beside it for comparison."""
+    kpis = ["Emissions reduction targets", "Emissions policy", "Training hours"]
+    meta = {"Emissions reduction targets": {"theme": "Emission", "key_issue": "Emissions I"},
+            "Emissions policy": {"theme": "Emission", "key_issue": "Emissions I"},
+            "Training hours": {"theme": "Training & Development", "key_issue": "Training I"}}
+    pages = [(12,
+              {"Emissions reduction targets": 90, "Emissions policy": 40, "Training hours": 30},
+              {},
+              {"Emissions reduction targets": "Measured Performance",
+               "Emissions policy": "Policy/Strategy",
+               "Training hours": "Policy/Strategy"})]
+
+    # Materials: Annexure A makes emissions a Signature topic, training only Moderate.
+    detail = scoring.category_detail(pages, kpis, meta, "Materials")
+    rows = {r["kpi"]: r for r in detail["kpis"]}
+    assert rows["Emissions reduction targets"]["materiality"] == "signature"
+    assert rows["Emissions reduction targets"]["evidence_type"] == "Measured Performance"
+    assert rows["Training hours"]["materiality"] == "moderate"
+
+    # Emission theme: (90*2.0*1.5 + 40*2.0*1.0) / (3.0 + 2.0) = 70.0
+    emission = next(t for t in detail["weighting"]["themes"] if t["theme"] == "Emission")
+    assert emission["score"] == 70.0
+    # Pillar: (70*5.0 + 30*1.0) / 6.0 = 63.33, against a flat average of 53.33.
+    assert detail["score"] == pytest.approx(63.33, abs=0.01)
+    assert detail["flat_score"] == pytest.approx(53.33, abs=0.01)
+    assert detail["weighting"]["sector"] == "Materials"
+
+
+def test_without_the_library_the_score_is_the_flat_average_it_always_was():
+    """BFSI and any run whose KPIs are not in the library keep the behaviour they had."""
+    kpis = ["A", "B"]
+    detail = scoring.category_detail([(1, {"A": 80, "B": 20})], kpis)
+    assert detail["score"] == 50.0 and "weighting" not in detail
+    assert all("materiality" not in r for r in detail["kpis"])

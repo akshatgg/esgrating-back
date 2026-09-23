@@ -342,6 +342,10 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
         # The same numbers, KPI by KPI, go into the report as its KPI Assessment.
         kpi_coverage = {}
         page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
+        # The company's sector, for the methodology's materiality weighting (Annexure A).
+        # The same value the report shows; an unrecognised one simply leaves every
+        # indicator at the default materiality.
+        sector = (final_scores.get("Environment") or {}).get("sector", "") or ""
         for category in scores:
             kpis = prompt_kpis(scoring_prompt(category))
             if not kpis:
@@ -356,7 +360,10 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                     continue
                 page_kpis = scoring.page_kpi_scores(parsed, kpis)
                 # The reason the scoring call gave for each KPI travels with its score.
-                entries.append((rec.get("page_no"), page_kpis, scoring.kpi_reasons(parsed, kpis)))
+                # The reason and the KIND of evidence both travel with the score: the kind
+                # is what the methodology's 8.3 indicator weighting is applied to.
+                entries.append((rec.get("page_no"), page_kpis, scoring.kpi_reasons(parsed, kpis),
+                                scoring.kpi_evidence_types(parsed, kpis)))
                 if isinstance(parsed, dict) and rec.get("page_no") is not None:
                     # Saved with the result for the Detailed Report's Page Scores and
                     # Scoring Rationale: the page's score (from its KPIs), its KPIs with
@@ -371,7 +378,12 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                         # Set when the answer's negative keywords disagree with its scores.
                         "review": scoring.contradiction(parsed, page_kpis),
                     }
-            detail = scoring.category_detail(entries, kpis)
+            # The library's taxonomy, so the indicators roll up the way the methodology
+            # says: Sub Pillar 1 is the Key Issue, Sub Pillar the Theme (8.2.7 steps 3-5).
+            meta = {k["metric"]: {"theme": k.get("sub_pillar", ""),
+                                  "key_issue": k.get("sub_pillar_1", "")}
+                    for k in scoring.load_kpis(category)}
+            detail = scoring.category_detail(entries, kpis, meta, sector)
             final_scores[category]["score"] = detail["score"]
             kpi_coverage[category] = detail
 

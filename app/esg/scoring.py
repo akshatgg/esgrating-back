@@ -25,7 +25,7 @@ import re
 
 from app.core.db import get_db
 from app.core.kpis import _names, kpi_strengths, page_sort_key
-from app.esg import prompts
+from app.esg import methodology, prompts
 
 # Stored on every result scored this way. Results without it (older runs) keep the
 # strong/partial KPI points and the old weights.
@@ -317,6 +317,22 @@ def kpi_reasons(parsed, kpis: list[str]) -> dict[str, str]:
     return out
 
 
+def kpi_evidence_types(parsed, kpis: list[str]) -> dict[str, str]:
+    """{KPI name: evidence_type} from one page's answer (SCORE_GUIDE section 30).
+
+    This is what the methodology's 8.3 indicator weighting is applied to -- whether the
+    evidence was a policy, an implementation, a target, measured performance or an assured
+    outcome. {} for an answer that does not report it, which leaves every indicator at the
+    default weight rather than guessing."""
+    out = {}
+    for finding in _findings(parsed):
+        kpi = _finding_kpi(finding, kpis)
+        kind = str(finding.get("evidence_type", "")).strip()
+        if kpi and kind and kpi not in out:
+            out[kpi] = kind
+    return out
+
+
 def contradiction(parsed, scores: dict[str, float]) -> str:
     """"" or a note for a page whose own answer disagrees with itself: it lists negative
     keywords (fines, penalties, spills, incidents) yet scored none of its KPIs as poor
@@ -372,23 +388,35 @@ def capped_score(scores: list[float]) -> tuple[float, bool]:
     return (max(scores), False) if scores else (0.0, False)
 
 
-def category_detail(pages: list, kpis: list[str]) -> dict:
+def category_detail(pages: list, kpis: list[str], meta: dict | None = None,
+                    sector: str = "") -> dict:
     """A category's KPI Assessment: every KPI with its score, the pages it was found on and
     the evidence for that score, plus the category score.
 
-    pages is [(page_no, {KPI name: 0-100})], or [(page_no, scores, {KPI name: reason})] to
-    carry the reason the scoring call gave for each KPI (kpi_reasons). A KPI takes its best
-    page score, capped when any page showed poor performance (capped_score); its evidence is
-    the page that produced the score it ends up with -- the poor page when it is capped."""
+    pages is [(page_no, {KPI name: 0-100})], or with a third element {KPI name: reason} and
+    a fourth {KPI name: evidence_type}. A KPI takes its strongest page contribution
+    (capped_score); its evidence is the page that produced it.
+
+    meta is {KPI name: {theme, key_issue}} from esg_kpis. With it the category score is the
+    methodology's own: indicators weighted by 8.3 evidence level and 7.2 materiality, then
+    Key Issue -> Theme -> Pillar (8.2.7 steps 2-5). Without it -- BFSI, and any run whose
+    KPIs are not in the library -- the score stays the flat average it has always been, so
+    nothing that already works changes shape."""
     seen = {k: [] for k in kpis}
     found_on = {k: [] for k in kpis}
+    kinds: dict[str, str] = {}
     for page in pages:
         page_no, scores = page[0], page[1]
         reasons = page[2] if len(page) > 2 and isinstance(page[2], dict) else {}
+        types = page[3] if len(page) > 3 and isinstance(page[3], dict) else {}
         for k, v in scores.items():
             if k not in seen:
                 continue
             seen[k].append((v, page_no, reasons.get(k, "")))
+            # The kind of evidence that set the score: the strongest page wins, as it does
+            # for the score itself.
+            if types.get(k) and v >= max((s for s, _p, _r in seen[k]), default=0):
+                kinds[k] = types[k]
             if page_no is not None and page_no not in found_on[k]:
                 found_on[k].append(page_no)
     final = {}
@@ -396,9 +424,31 @@ def category_detail(pages: list, kpis: list[str]) -> dict:
     for k in kpis:
         score, capped = capped_score([v for v, _p, _r in seen[k]])
         final[k] = score
-        rows.append(kpi_row(k, score, sorted(found_on[k], key=page_sort_key), capped,
-                            _evidence(seen[k], capped)))
-    return {"method": METHOD, "score": category_score(final), "kpis": rows}
+        row = kpi_row(k, score, sorted(found_on[k], key=page_sort_key), capped,
+                      _evidence(seen[k], capped))
+        info = (meta or {}).get(k) or {}
+        if info:
+            row["theme"] = info.get("theme", "")
+            row["key_issue"] = info.get("key_issue", "")
+            row["evidence_type"] = kinds.get(k, "")
+            row["materiality"] = methodology.materiality_of(row["theme"], sector, "")
+        rows.append(row)
+
+    detail = {"method": METHOD, "score": category_score(final), "kpis": rows}
+    if meta:
+        weighted = methodology.aggregate([
+            {"score": r["score"], "theme": r["theme"], "key_issue": r["key_issue"],
+             "evidence_type": r.get("evidence_type"), "materiality": r["materiality"]}
+            for r in rows if "materiality" in r])
+        # None means every indicator was Not Applicable; the flat average stands rather
+        # than a pillar disappearing from the rating.
+        if weighted["score"] is not None:
+            detail["score"] = weighted["score"]
+            detail["flat_score"] = category_score(final)
+        detail["weighting"] = {"themes": weighted["themes"], "applicable": weighted["applicable"],
+                               "excluded": weighted["excluded"],
+                               "sector": (methodology.sector_profile(sector) or ("", ()))[0]}
+    return detail
 
 
 # How many other scored pages a KPI keeps a reason for, beside the one that set its
