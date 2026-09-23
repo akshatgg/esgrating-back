@@ -24,51 +24,59 @@ def test_page_score_is_the_average_of_the_page_kpis():
 
 
 def test_methodology_example():
-    """The worked example in docs/ESG_SCORING_METHODOLOGY.md: KPI 9 is scored 75 on one
-    page and 15 (poor performance) on another, so it is held down to 20."""
+    """KPI 9 contributes 75 on one page and 15 on another. SCORE_GUIDE section 5 takes the
+    strongest evidence across the document, so it scores 75 -- the weak page does not pull
+    it down."""
     kpis = [f"KPI {i}" for i in range(1, 11)]
     pages = [(1, {}), (2, {"KPI 8": 45, "KPI 9": 75}), (7, {"KPI 4": 55, "KPI 9": 15})]
     detail = scoring.category_detail(pages, kpis)
     rows = {r["kpi"]: r for r in detail["kpis"]}
     assert (rows["KPI 4"]["score"], rows["KPI 4"]["pages"]) == (55, [7])
     assert (rows["KPI 8"]["score"], rows["KPI 8"]["pages"]) == (45, [2])
-    assert (rows["KPI 9"]["score"], rows["KPI 9"]["pages"]) == (20, [2, 7])
-    assert rows["KPI 9"]["capped"] is True and "capped" not in rows["KPI 4"]
+    assert (rows["KPI 9"]["score"], rows["KPI 9"]["pages"]) == (75, [2, 7])
+    assert "capped" not in rows["KPI 9"] and "capped" not in rows["KPI 4"]
     assert (rows["KPI 1"]["score"], rows["KPI 1"]["pages"]) == (0, [])
-    # The average of all 10 KPI scores: (55 + 45 + 20) / 1000 * 100
-    assert detail["score"] == 12.0
-    overall = scoring.composite_score(12.0, 22, 30)
-    assert overall == pytest.approx(21.30)
+    # The average of all 10 KPI scores: (55 + 45 + 75) / 1000 * 100
+    assert detail["score"] == 17.5
+    overall = scoring.composite_score(17.5, 22, 30)
+    assert overall == pytest.approx(23.225)
     assert scoring.evaluate_score(overall) == ("D", "Below Average")
 
 
-def test_poor_performance_caps_the_kpi_but_only_when_it_is_beaten():
-    assert scoring.capped_score([75, 15]) == (20.0, True)     # good page, poor page -> 20
-    assert scoring.capped_score([15, 8]) == (15.0, False)     # all poor: its own best stands
-    assert scoring.capped_score([20, 90]) == (20.0, True)     # 20 is still poor
-    assert scoring.capped_score([21, 90]) == (90.0, False)    # 21 is weak, not poor
+def test_a_kpi_takes_its_strongest_evidence_and_is_never_capped():
+    """SCORE_GUIDE sections 5 and 26: the final KPI score is the strongest reliable evidence
+    across the whole document, and weak evidence on one page must not override it."""
+    assert scoring.capped_score([75, 15]) == (75, False)      # the poor page no longer caps
+    assert scoring.capped_score([15, 8]) == (15, False)
+    assert scoring.capped_score([20, 90]) == (90, False)
+    assert scoring.capped_score([21, 90]) == (90, False)
     assert scoring.capped_score([]) == (0.0, False)
     assert scoring.capped_score([0, 0]) == (0.0, False)
 
 
-def test_an_analyst_edit_replaces_a_capped_score():
+def test_an_analyst_edit_replaces_the_ai_score():
     detail = scoring.category_detail([(2, {"A": 80}), (3, {"A": 10})], ["A", "B"])
-    assert detail["kpis"][0]["score"] == 20 and detail["kpis"][0]["capped"] is True
+    assert detail["kpis"][0]["score"] == 80 and "capped" not in detail["kpis"][0]
     edited = scoring.rescore_category(detail, {"A": 70})
     assert edited["kpis"][0]["score"] == 70 and "capped" not in edited["kpis"][0]
     assert edited["score"] == 35.0                            # (70 + 0) / 200 * 100
 
 
-def test_classification_reads_the_categories_and_skips_junk():
-    assert scoring.parse_categories({"categories": ["Social", "Environment"]}) == ["Environment", "Social"]
-    assert scoring.parse_categories({"categories": ["E", "g"]}) == ["Environment", "Governance"]
-    assert scoring.parse_categories({"categories": ["Finance", 7]}) == []
-    assert scoring.parse_categories({"categories": []}) == []
-    # None, not [] -- an unreadable answer must not silently skip the page
-    assert scoring.parse_categories({"other": 1}) is None
-    assert scoring.parse_categories("boom") is None
+def test_classification_reads_the_pillars_and_skips_junk():
+    """CLASSIFY_GUIDE section 17 returns primary_pillars and secondary_pillars; both are
+    read. The older "categories" field still reads, so stored results keep working."""
+    f = scoring.parse_categories
+    assert f({"primary_pillars": ["S"], "secondary_pillars": ["E"]}) == ["Environment", "Social"]
+    assert f({"primary_pillars": ["E", "g"], "secondary_pillars": []}) == ["Environment", "Governance"]
+    assert f({"categories": ["Social", "Environment"]}) == ["Environment", "Social"]
+    assert f({"primary_pillars": ["Finance", 7]}) == []
+    assert f({"primary_pillars": []}) == []
+    # None, not [] -- an unreadable answer is not the same as a page with no pillars
+    assert f({"other": 1}) is None
+    assert f("boom") is None
     prompt = scoring.classify_prompt("page {text} with 100% braces")
-    assert prompt.endswith("Page:\npage {text} with 100% braces") and '"categories"' in prompt
+    assert prompt.endswith("Page:\npage {text} with 100% braces")
+    assert "Every page remains available" in prompt
 
 
 def test_levels_and_labels():
@@ -76,10 +84,14 @@ def test_levels_and_labels():
     assert scoring.kpi_labels({"A": 32.0, "B": 80.5}, KPIS) == ["B (80.5)", "A (32)"]
 
 
-def test_prompt_guide_goes_before_the_text_and_survives_format():
+def test_prompt_guide_goes_before_the_text_and_keeps_its_braces():
+    """The guide carries the client's JSON examples, so the page text is substituted, never
+    str.format()ted -- formatting would read his braces as fields (app/esg/pipeline.py)."""
     prompt = scoring.with_score_guide("Score:\n1. A\n\nText:\n{text}")
-    assert prompt.format(text="x").endswith("Text:\nx")
-    assert '"kpi_scores"' in prompt and "81-100:" in prompt
+    assert prompt.replace("{text}", "x").endswith("Text:\nx")
+    assert '"kpi_findings"' in prompt and '"score_contribution"' in prompt
+    with pytest.raises(KeyError):
+        prompt.format(text="x")
 
 
 def test_the_guide_replaces_the_leftover_page_score_fields():
@@ -96,7 +108,7 @@ def test_the_guide_replaces_the_leftover_page_score_fields():
     assert "A Detailed explanation of the score" not in out
     assert "contributed positively" not in out
     assert '- "sector": The sector of the company.' in out        # untouched
-    assert '- "reason": One line for each point you scored' in out
+    assert '- "kpi_findings":' in out                              # the guide's own fields
     assert out.endswith("Text:\n{text}")
 
 

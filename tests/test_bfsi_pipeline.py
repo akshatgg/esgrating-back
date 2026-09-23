@@ -39,15 +39,16 @@ class FakeClient:
 
     def batch(self, prompts, concurrency=8):
         self.batches.append(dict(prompts))
-        if prompts and all('"categories"' in p for p in prompts.values()):
-            return {k: {"categories": list(self.categories)} for k in prompts}
+        if prompts and all("CFC ESG Page Classification" in p for p in prompts.values()):
+            return {k: {"primary_pillars": list(self.categories), "secondary_pillars": []}
+                    for k in prompts}
         return {k: self._responder(k, p) for k, p in prompts.items()}
 
     @property
     def scoring_batches(self):
         """The three category batches, without the step 0 classification batch."""
         return [b for b in self.batches
-                if not (b and all('"categories"' in p for p in b.values()))]
+                if not (b and all("CFC ESG Page Classification" in p for p in b.values()))]
 
     def json(self, user, system=""):
         self.json_calls.append((user, system))
@@ -209,10 +210,11 @@ Text:
     # scores are the marks, and "reason" and the keyword lists now explain those marks.
     assert '- "score": A number between 0 and 100.' not in first
     assert '- "reason": A Detailed explanation of the score.' not in first
-    assert '- "kpi_scores": A list of [point number, score] pairs' in first and "81-100:" in first
-    assert '- "reason": One line for each point you scored' in first
-    assert '- "positive_keywords": The words or short phrases from this text that earned' in first
-    assert '- "negative_keywords": The words or short phrases from this text that show poor' in first
+    # The scoring guide is the client's (app/esg/prompts/score_guide.txt), shared with ESG.
+    assert '- "kpi_findings":' in first and '"score_contribution"' in first
+    assert '"score_reason"' in first                 # his per-KPI reason, not a page reason
+    assert '- "positive_keywords": the words or short phrases from this page' in first
+    assert '- "negative_keywords": the words or short phrases from this page' in first
     assert "%1$s" not in first and "%2$s" not in first and "%3$s" not in first
     assert fake.scoring_batches[1][0].startswith("Analyze the following text for social performance.")
     assert fake.scoring_batches[2][0].startswith("Analyze the following text for governance performance.")

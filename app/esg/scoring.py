@@ -2,12 +2,14 @@
 # Methodology: docs/ESG_SCORING_METHODOLOGY.md (user, 2026-09-18). ESG only; BFSI keeps
 # its own scoring (app/core/kpis.py, app/bfsi/scoring.py).
 #
-#   0. page          -> the categories the page has content about (CLASSIFY_GUIDE); a page
-#                       with no ESG content is not scored at all
-#   1. KPI on a page -> for those categories only, the AI scores each KPI the page shows
-#                       performance for, 0-100 on how GOOD it is (SCORE_GUIDE)
-#   2. KPI           -> its best score on any page, capped at CAP_SCORE when any page
-#                       showed poor performance; a KPI found nowhere scores 0
+#   0. page          -> what the page contains: pillars, themes, relevance (CLASSIFY_GUIDE).
+#                       Reported only -- his sections 3 and 18 forbid classification
+#                       removing a page from KPI analysis, so every page is scored
+#   1. KPI on a page -> against ALL THREE pillars, the AI returns one finding per KPI the
+#                       page evidences, with a 0-100 score_contribution (SCORE_GUIDE s.30)
+#   2. KPI           -> the strongest contribution from any page; a KPI found nowhere
+#                       scores 0. No cap: his sections 5 and 26 forbid weak evidence on one
+#                       page overriding stronger evidence on another
 #   3. category      -> the average of ALL its KPI scores, missing ones included as 0
 #                       (total of the scores / (number of KPIs x 100) x 100 is that average)
 #   4. overall       -> 35% Environment + 30% Social + 35% Governance
@@ -23,6 +25,7 @@ import re
 
 from app.core.db import get_db
 from app.core.kpis import _names, kpi_strengths, page_sort_key
+from app.esg import prompts
 
 # Stored on every result scored this way. Results without it (older runs) keep the
 # strong/partial KPI points and the old weights.
@@ -36,150 +39,46 @@ LEGACY_WEIGHTS = {"Environment": 0.30, "Social": 0.30, "Governance": 0.40}
 
 MAX_SCORE = 100.0
 
-# Added to each category's scoring prompt, after its response fields. No braces: the
-# prompt is .format()ted with the page text.
-#
-# The score says how GOOD the performance is, not how much detail is written (user,
-# 2026-09-18: "u dont have to score on that basisi u have to score on the basiss of kpis
-# delts is good or not whatever is written in the page" / "if only mention so still u have
-# to give 0").
-SCORE_GUIDE = (
-    # The client's KPI evidence-validation brief (manager, 2026-09-22), kept whole. Two
-    # sections are the pipeline's rather than his: the score bands (his 1-30 for a bare
-    # mention would pay for naming a KPI, and his scale has no band for poor performance,
-    # which capped_score() and contradiction() both read), and the response fields (the
-    # pipeline scores a page against a numbered list, and the one-pager's KPI chips are
-    # built from the keyword lists). Everything he requires per KPI -- evidence type,
-    # direction, why the score -- is required in the reason line instead of as separate
-    # JSON keys, so nothing is lost and the answer stays parseable.
-    "You are an ESG KPI evidence validation and scoring analyst. Evaluate each numbered "
-    "evaluation point ONLY against the text supplied below.\n"
-    "\n"
-    "You must NOT assume a point is evidenced merely because: the point's name or similar "
-    "words appear in the text; a related ESG concept is mentioned; a general policy or "
-    "commitment is mentioned; the company states an intention to act in future; the company "
-    "describes an activity without demonstrating what the point requires; the text contains "
-    "generic ESG language; or the text discusses the topic in a different context.\n"
-    "\n"
-    "For every point, first understand WHAT IT IS ACTUALLY MEASURING and what evidence is "
-    "required to support a positive score. Then read the relevant passage in context and "
-    "decide whether the disclosure actually satisfies that requirement.\n"
-    "\n"
-    "IMPORTANT: keyword matching is NEVER sufficient evidence. Semantic similarity is NEVER "
-    "sufficient evidence. Understand the meaning, context, direction and sentiment of the "
-    "disclosure before assigning a score. 'Today is a rainy day' is neither positive nor "
-    "negative on its own; the meaning depends on what is being evaluated.\n"
-    "\n"
-    "If the point is 'Emissions reduction target', none of these automatically earn a "
-    "positive score: 'The company shall establish emissions reduction targets.' / 'The "
-    "company is committed to emissions reduction targets.' / 'The company intends to reduce "
-    "emissions in the future.' They show a commitment or a policy. They do not show that "
-    "emissions were reduced or that a measurable target with progress exists.\n"
-    "\n"
-    "Distinguish carefully between: (1) Mention -- the topic is merely mentioned; (2) Policy "
-    "or Commitment -- a policy, intention, commitment or planned action; (3) Action or "
-    "Programme -- an actual initiative, programme or action; (4) Measured Performance -- "
-    "measured data, results, outcomes, targets, progress or quantified performance. Do not "
-    "upgrade a point from one category to another without evidence. 'We aim to reduce GHG "
-    "emissions by 30% by 2030' is a target, NOT evidence that emissions have already fallen "
-    "30%. 'GHG emissions decreased from 100,000 tCO2e to 80,000 tCO2e' is measured "
-    "reduction. The score must reflect what the disclosure actually demonstrates, not what "
-    "the company intends to achieve.\n"
-    "\n"
-    "NEGATIVE / LIMITATION CONTEXT: identify whether the passage is negative, neutral or "
-    "positive relative to what the point requires. 'Emissions increased by 12% during the "
-    "reporting period despite our reduction programme' must NOT earn a positive emissions "
-    "score merely because a reduction programme is mentioned. 'No progress was made against "
-    "the emissions reduction target' must not score highly merely because a target exists. "
-    "The requirement and the actual outcome must be weighed together.\n"
-    "\n"
-    "CONTEXT IS MANDATORY: read the complete relevant paragraph and, where needed, the "
-    "surrounding paragraphs, tables, footnotes and headings before scoring. Do not score "
-    "from an isolated sentence when the surrounding context changes its meaning.\n"
-    "\n"
-    "SOURCE GROUNDING: every point you score must be supported by what this text actually "
-    "says, and your reason for it must give the supporting evidence, which of the four "
-    "categories above it is, whether it is positive, neutral or negative, and why that "
-    "earns the score. Do NOT manufacture evidence. Do NOT infer evidence from general ESG "
-    "language. Do NOT use outside knowledge, other reports, other companies, websites or "
-    "anything you know beyond this text.\n"
-    "\n"
-    "CRITICAL ANTI-HALLUCINATION RULE: if this text does not contain evidence supporting a "
-    "point, that point must NOT be scored. If 'Palm oil sourcing policy' does not appear or "
-    "is not substantively addressed, it must not be treated as evidenced simply because it "
-    "exists in the KPI library. Likewise 'OECD Guidelines for MNEs' must not be scored "
-    "unless the text discloses it. The KPI library defines WHAT TO LOOK FOR. The text "
-    "determines WHETHER IT EXISTS.\n"
-    "\n"
-    "SCORING: do not give a high score merely because the text contains the point's "
-    "keyword. The score must reflect the strength and specificity of the actual evidence, "
-    "and how good the company's performance on that point is.\n"
-    '- "kpi_scores": A list of [point number, score] pairs for the evaluation points listed '
-    "above that this text genuinely evidences. Score each from 0 to 100:\n"
-    "  0: only named, listed or mentioned, only promised, planned or pending, or too little "
-    "to judge -- a point this text does not genuinely evidence scores 0\n"
-    "  1-20: poor -- fines, penalties, lawsuits, incidents, accidents, a worsening trend, or "
-    "an admitted failure\n"
-    "  21-40: a policy, commitment or stated intention, with little evidence of "
-    "implementation\n"
-    "  41-60: a real action, programme or initiative in place, but no measured result\n"
-    "  61-80: measured results, or real progress against a target\n"
-    "  81-100: targets met, a measured improvement, independent assurance or certification\n"
-    "These ranges are NOT automatic. A point requiring measured performance cannot reach "
-    "61-100 because a policy exists. A point requiring a policy cannot score highly because "
-    "the topic is mentioned. A negative outcome must not be treated as positive because the "
-    "company has a policy or programme addressing it. Judge how good the performance is, "
-    "never how much detail is written. Leave out the points this text says nothing about, "
-    "and use an empty list if it says nothing about any of them.\n"
-    '- "reason": One line for each point you scored, in the form '
-    '"<point number> <score>: <evidence, its category, its direction, and why it earns that '
-    'score>" -- for example "18 85: Scope 1 and 2 emissions down 22 percent against a 2030 '
-    'target; measured performance, positive, a measured improvement against a stated '
-    'target". Nothing else: no overall score and no overall verdict for the page.\n'
-    '- "positive_keywords": The words or short phrases from this text that earned the higher '
-    "scores above -- the measured results, targets met, certifications or assurance you saw. "
-    "Quote the text, do not invent a phrase, and use an empty list if nothing earned a "
-    "score.\n"
-    '- "negative_keywords": The words or short phrases from this text that show poor '
-    "performance -- the fines, penalties, lawsuits, incidents, accidents or worsening "
-    "numbers behind any score of 1 to 20. Quote the text, and use an empty list if there are "
-    "none.\n"
-    "\n"
-    "Never reward keyword presence alone. Never convert intention into achievement. Never "
-    "convert policy into performance. Never convert activity into outcome. Never convert "
-    "generic ESG language into point-specific evidence."
-)
+# Metric names are matched on meaning, not layout: the model echoes the KPI back and may
+# re-space or re-case it.
+_WS = re.compile(r"\s+")
 
-# The response fields SCORE_GUIDE replaces. The scoring prompt (esg_prompts for ESG,
-# CATEGORY_PROMPT for BFSI) still asks for an overall page "score", for a "reason" that
-# explains that score, and for keywords that "influenced the score" -- all left over from
-# before KPI scoring. The page score is never used (a page's score is the average of its
-# KPI scores), and a reason or a keyword list about it contradicts the KPI marks in the
-# same row. So those lines are dropped from the prompt as it is sent, and SCORE_GUIDE
-# defines reason and both keyword lists against the KPI scores instead. The stored
-# templates are never modified.
+# The CFC KPI Evidence Analysis and Scoring Engine prompt, adopted verbatim from the
+# client's own document (CFC, 2026-09-23; app/esg/prompts/score_guide.txt). It replaces the
+# prompt written here before it, on the instruction to follow his prompts as issued.
+#
+# His section 30 defines the shape of ONE KPI finding. It does not say how a page returns
+# many of them, and the report still needs the page-level keyword lists that build the
+# one-pager's KPI chips and the CSV export. RESPONSE_ENVELOPE adds only that wrapper --
+# a list of his objects plus the two keyword lists. None of his wording is altered.
+SCORE_GUIDE = prompts.load("score_guide") + """
+
+========================================================
+RESPONSE FORMAT
+========================================================
+Return JSON with exactly these fields:
+- "kpi_findings": a list holding one object, in the form given in section 30 above, for
+  every KPI in the library above for which THIS page contains relevant evidence. Use the
+  KPI's exact "metric" text as listed. Leave out the KPIs this page says nothing about,
+  and use an empty list when the page evidences none of them.
+- "positive_keywords": the words or short phrases from this page that carried the higher
+  score contributions -- the measured results, targets met, certifications or assurance you
+  saw. Quote the page; do not invent a phrase. Empty list if there are none.
+- "negative_keywords": the words or short phrases from this page that show poor
+  performance -- the fines, penalties, lawsuits, incidents, accidents, missed targets or
+  worsening numbers you saw. Quote the page. Empty list if there are none."""
+
 _DROP_FIELDS = re.compile(r'(?m)^- "(?:score|reason|positive_keywords|negative_keywords)":.*\n?')
 
-# Step 0: which categories the page is about, so only those categories' KPIs are matched
-# against it (user, 2026-09-18: "Firstly, you have to analyse whether that thing lies in
-# which category ... After that, you will have to match the KPIs"). A page can be in more
-# than one category; a page with no ESG content is not scored at all.
-CLASSIFY_GUIDE = (
-    "Read the page below from a company report and say which ESG categories it has real "
-    "content about.\n"
-    "- Environment: emissions, energy, water, waste, pollution, biodiversity, climate, "
-    "resource use, environmental compliance.\n"
-    "- Social: employees, health and safety, training, diversity, human rights, labour, "
-    "communities, customers, product safety and access.\n"
-    "- Governance: board, directors, ethics, anti-corruption, audit, risk, shareholders, "
-    "remuneration, transparency, regulatory compliance.\n"
-    "Name a category only if the page says something about the company's own performance, "
-    "practices or data in it. Leave every category out for a cover page, an index, a "
-    "photograph caption, a purely financial table or anything else with no ESG content.\n"
-    'Answer in JSON with one field:\n'
-    '- "categories": a list holding any of "Environment", "Social", "Governance", or an '
-    "empty list."
-)
+# The CFC Page Classification and Relevance Engine prompt, adopted verbatim from the
+# client's own document (CFC, 2026-09-23; app/esg/prompts/classify_guide.txt).
+#
+# His sections 3 and 18 are explicit that classification must never remove a page from KPI
+# scoring -- "Every page remains available for KPI evidence evaluation" -- so the pipeline
+# no longer uses this answer to choose which pillars to score. It is read for the pillars,
+# themes and relevance it reports, which the narrative uses; every page is scored against
+# all three pillars regardless of what comes back here.
+CLASSIFY_GUIDE = prompts.load("classify_guide")
 
 
 def classify_prompt(text: str) -> str:
@@ -189,15 +88,30 @@ def classify_prompt(text: str) -> str:
 
 
 def parse_categories(parsed) -> list[str]:
-    """The categories from a step 0 answer, in CATEGORIES order. Junk and unknown names
-    are dropped. None means the answer could not be read at all, so the caller falls back
-    to scoring every category rather than silently skipping the page."""
+    """The pillars a classification answer reports, in CATEGORIES order.
+
+    CLASSIFY_GUIDE section 17 returns "primary_pillars" and "secondary_pillars" as the
+    codes E, S and G; both are read, because his section 11 allows a page to be primarily
+    one pillar and substantively another. The older "categories" field is still accepted so
+    results stored before this prompt keep reading.
+
+    This is reported, not used to choose what to score: his sections 3 and 18 forbid
+    classification removing a page from KPI analysis, so the pipeline scores every page
+    against all three pillars whatever comes back here."""
     if not isinstance(parsed, dict):
         return None
-    raw = parsed.get("categories")
-    if isinstance(raw, dict):
-        raw = list(raw.values())
-    if not isinstance(raw, (list, tuple)):
+    raw, readable = [], False
+    for field in ("primary_pillars", "secondary_pillars", "categories"):
+        value = parsed.get(field)
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, (list, tuple)):
+            raw.extend(value)
+            readable = True          # an empty list is an answer: no pillars on this page
+        elif isinstance(value, str):
+            raw.append(value)
+            readable = True
+    if not readable:
         return None
     named = {str(c).strip().lower() for c in raw if isinstance(c, (str, int, float))}
     return [c for c in CATEGORIES if c.lower() in named or PILLAR_CODES[c].lower() in named]
@@ -221,19 +135,24 @@ _NUMBERED_LIST = re.compile(r"(?m)^[ \t]*\d+\.[ \t]+\S.*(?:\n[ \t]*\d+\.[ \t]+\S
 
 
 def load_kpis(category: str) -> list[dict]:
-    """The category's metrics from esg_kpis in sheet order: [{metric, sub_pillar,
+    """The category's metrics from esg_kpis in sheet order: [{metric, question, sub_pillar,
     sub_pillar_1}]. Meta rows (company facts, not scorable) are left out. Empty when the
     collection has no metrics for the category."""
     return list(get_db()[KPI_COLLECTION].find(
         {"pillar": PILLAR_CODES[category], "is_meta": {"$ne": True}},
-        {"_id": 0, "metric": 1, "sub_pillar": 1, "sub_pillar_1": 1},
+        {"_id": 0, "metric": 1, "question": 1, "sub_pillar": 1, "sub_pillar_1": 1},
     ).sort("order", 1))
 
 
 def kpi_list_text(kpis: list[dict]) -> str:
-    """The metrics numbered 1..N, grouped under their Sub Pillar and Sub Pillar 1 so the AI
-    knows what each short metric name is about. Only the numbered lines are KPIs
-    (app/core/kpis.py parse_kpi_list skips the headings)."""
+    """The metrics numbered 1..N, grouped under their Sub Pillar and Sub Pillar 1, each with
+    the Question it asks.
+
+    SCORE_GUIDE section 2 makes the Question the primary test -- "The Metric is only the KPI
+    label" -- so it is sent with every KPI. It goes on its own unnumbered line: only the
+    numbered lines are KPIs (app/core/kpis.py parse_kpi_list skips everything else), and the
+    pipeline reads the KPI names back out of the rendered prompt, so a Question appended to
+    the numbered line would rename every KPI in the report."""
     lines, sub_pillar, sub_pillar_1 = [], None, None
     for i, k in enumerate(kpis, 1):
         if k["sub_pillar"] != sub_pillar:
@@ -243,6 +162,9 @@ def kpi_list_text(kpis: list[dict]) -> str:
             sub_pillar_1 = k["sub_pillar_1"]
             lines.append(f"  Sub Pillar 1: {sub_pillar_1}")
         lines.append(f"    {i}. {k['metric']}")
+        question = str(k.get("question", "")).strip()
+        if question:
+            lines.append(f"       Question: {question}")
     return "\n".join(lines)
 
 
@@ -276,20 +198,57 @@ def _score(value) -> float | None:
     return max(0.0, min(MAX_SCORE, n))
 
 
+def _findings(parsed) -> list[dict]:
+    """The page's KPI finding objects (SCORE_GUIDE section 30), or [] when the answer has
+    none. Only objects are kept, so a stray string in the list cannot break a page."""
+    raw = parsed.get("kpi_findings") if isinstance(parsed, dict) else None
+    return [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+
+
+def _finding_kpi(finding: dict, kpis: list[str]) -> str | None:
+    """The KPI a finding is about: its "metric" matched against the library sent to the
+    model, ignoring case and spacing. Falls back to the point number for answers written
+    before the metric was echoed back."""
+    metric = str(finding.get("metric", "")).strip()
+    if metric:
+        wanted = _WS.sub(" ", metric).casefold()
+        for kpi in kpis:
+            if _WS.sub(" ", kpi).casefold() == wanted:
+                return kpi
+    names = _names([finding.get("page_kpi_number", finding.get("number"))], kpis)
+    return names[0] if names else None
+
+
 def page_kpi_scores(parsed, kpis: list[str]) -> dict[str, float]:
     """{KPI name: 0-100} from one page's scoring answer.
 
-    "kpi_scores" is read as [point number, score] pairs ({number: score} is accepted too).
-    Unknown point numbers and junk are dropped, a KPI named twice keeps its higher score,
-    and a 0 is left out (the page doesn't address that KPI). An answer that only has the
-    older strong/partial lists reads as 100 / 50."""
+    The answer is SCORE_GUIDE section 30: one object per KPI this page evidences, carrying
+    the KPI's own "metric" and its "score_contribution" for this page. A KPI named twice
+    keeps its higher contribution, and a 0 is left out -- his section 4 is explicit that a
+    page with no evidence for a KPI is not a negative result for it, so it must not be
+    recorded as a score of 0 on that page.
+
+    Results stored before this prompt are still read: "kpi_scores" as [point number, score]
+    pairs, and older runs still through their strong/partial lists."""
     if not isinstance(parsed, dict):
         return {}
+    out = {}
+    for finding in _findings(parsed):
+        # "evidence_found_on_page": false is his way of saying the page has nothing for the
+        # KPI, whatever number accompanies it.
+        if finding.get("evidence_found_on_page") is False:
+            continue
+        kpi = _finding_kpi(finding, kpis)
+        score = _score(finding.get("score_contribution"))
+        if kpi and score:
+            out[kpi] = max(out.get(kpi, 0.0), score)
+    if out:
+        return out
+
     raw = parsed.get("kpi_scores")
     if raw is None:
         return kpi_strengths(parsed, kpis)
     pairs = raw.items() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
-    out = {}
     for pair in pairs:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             continue
@@ -333,6 +292,15 @@ def kpi_reasons(parsed, kpis: list[str]) -> dict[str, str]:
 
     An answer whose "reason" is one block of prose about the whole page gives {}: there is
     no way to tell which KPI it belongs to, so nothing is attributed to any of them."""
+    out = {}
+    for finding in _findings(parsed):
+        kpi = _finding_kpi(finding, kpis)
+        reason = str(finding.get("score_reason", "")).strip()
+        if kpi and reason and kpi not in out:
+            out[kpi] = reason
+    if out:
+        return out
+
     text = reason_text(parsed)
     if not text:
         return {}
@@ -384,16 +352,19 @@ def category_score(best: dict[str, float]) -> float:
 
 
 def capped_score(scores: list[float]) -> tuple[float, bool]:
-    """A KPI's score from every page score it earned: its best, but held down to
-    CAP_SCORE when any page showed poor performance (1-POOR_TO). Returns the score and
-    whether the cap applied."""
+    """A KPI's score from every page contribution it earned: the strongest.
+
+    The second value is whether a cap was applied, and is now always False. Until
+    2026-09-23 a KPI whose evidence was poor on any page (1-POOR_TO) was held down to
+    CAP_SCORE. SCORE_GUIDE sections 5 and 26 rule that out -- "weak evidence from one page
+    must not override stronger relevant evidence elsewhere", and the final score is "the
+    strongest reliable, relevant and applicable evidence available across the COMPLETE
+    source document" -- so the cap is not applied to anything scored under his prompt.
+
+    The flag, CAP_SCORE and POOR_TO stay because reports scored before this still carry
+    "capped": True on their rows and must keep rendering the way they were issued."""
     scores = [s for s in scores if s > 0]
-    if not scores:
-        return 0.0, False
-    best = max(scores)
-    if best > CAP_SCORE and min(scores) <= POOR_TO:
-        return CAP_SCORE, True
-    return best, False
+    return (max(scores), False) if scores else (0.0, False)
 
 
 def category_detail(pages: list, kpis: list[str]) -> dict:

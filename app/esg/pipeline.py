@@ -102,9 +102,9 @@ def analyze_text_with_gpt(text, category):
     # Define prompts for each ESG category
     try:
         prompt = scoring.with_score_guide(scoring_prompt(category))  # KPI scores 0-100 (app/esg/scoring.py)
-        prompt = prompt.format(
-            text=text
-        )
+        # Substituted, not .format()ted: SCORE_GUIDE carries the client's JSON examples, so
+        # the prompt contains braces that str.format would read as fields.
+        prompt = prompt.replace("{text}", text)
         response = llm_mod.get_llm().generate_score(prompt)
         return response, text
     except Exception as e:
@@ -233,15 +233,15 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 read_prompt(category)  # fail loudly before any scoring if a prompt is missing
 
             text_chunks = split_text_into_chunks(processed_data, max_tokens=2000)
-            # Step 0: each chunk is scored only for the categories it has content about.
-            chunk_cats = classify_pages(text_chunks)
+            # No classification call here: chunks are not pages, so there is no page to
+            # attach the result to, and classification no longer decides what is scored
+            # (CLASSIFY_GUIDE sections 3 and 18). Every chunk goes to every pillar.
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
                     logger.info(f"Analyzing {category}...")
                     futures = [executor.submit(analyze_chunk, chunk, category)
-                               for i, chunk in enumerate(text_chunks)
-                               if category in chunk_cats.get(i, ())]
+                               for chunk in text_chunks]
                     for future in concurrent.futures.as_completed(futures):
                         try:
                             analysis, text = future.result()
@@ -270,18 +270,28 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             for category in scores:
                 read_prompt(category)  # fail loudly before any scoring if a prompt is missing
 
-            # Step 0: one call per page decides its categories; only those categories'
-            # KPIs are then matched against it (app/esg/scoring.py).
+            # Step 0: one call per page records what the page contains -- its pillars,
+            # themes, relevance and reporting period (CLASSIFY_GUIDE section 17).
+            #
+            # It does NOT decide what is scored. CLASSIFY_GUIDE sections 3 and 18 are
+            # explicit: "Never allow page classification to suppress a page from the full
+            # evidence analysis" and "Every page remains available for KPI evidence
+            # evaluation". So every page with text is scored against all three pillars.
+            # This is what the client's prompt requires and it costs more calls than
+            # scoring only the classified pillars did (user, 2026-09-24).
             pages_with_text = [p for p in processed_data if p.get("text", "").strip()]
             page_cats = classify_pages([p["text"] for p in pages_with_text])
+            # Kept against the page it describes: the pillars his classification engine
+            # reported. Scoring ignores it (above), the record keeps it.
+            classified = {page.get("page_no"): page_cats.get(i)
+                          for i, page in enumerate(pages_with_text)}
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
                     logger.info(f"Analyzing {category}...")
                     futures = [
                         executor.submit(analyze_chunk, page.get("text", ""), category)
-                        for i, page in enumerate(pages_with_text)
-                        if category in page_cats.get(i, ())
+                        for page in pages_with_text
                     ]
                     for future in concurrent.futures.as_completed(futures):
                         try:
@@ -296,7 +306,8 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                                     "text": text,
                                     "filename": filename,
                                     "page_no": page_no,
-                                    "category": category
+                                    "category": category,
+                                    "classified_pillars": classified.get(page_no),
                                 })
                                 scores[category].append(analysis)
                         except Exception as e:
