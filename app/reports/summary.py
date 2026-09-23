@@ -284,8 +284,8 @@ NARRATIVE_SYSTEM = (
     "A weakness says what the report does not evidence or evidences weakly, why that matters "
     "for the rating, and what disclosure would raise it -- drawn only from the gaps supplied.\n"
     "'rating_rationale' is the report's Scoring Rationale, read by anyone who asks how the "
-    "scores were arrived at: TWO OR THREE paragraphs, 200 to 320 words in total, separated by "
-    "a blank line. Take each pillar in turn -- what its evidence showed, which KPIs carried the "
+    "scores were arrived at: a LIST of TWO OR THREE paragraphs, 200 to 320 words in total -- "
+    "one string per paragraph, never one long string. Take each pillar in turn -- what its evidence showed, which KPIs carried the "
     "score and which were missing, and how that produced the pillar's number -- then close with "
     "how the three weigh together into the overall score and its grade. Continuous prose, no "
     "page-by-page listing and no bare KPI names.\n"
@@ -294,8 +294,9 @@ NARRATIVE_SYSTEM = (
     "constrained by. Together they must explain the grade to a reader who sees nothing else.\n"
     # The body of the report: a written assessment of each pillar, the way a rating agency
     # writes one, not a summary of the table above it (user, 2026-09-20).
-    "Each entry of 'pillar_narratives' is the WRITTEN ASSESSMENT of that pillar: THREE OR "
-    "FOUR paragraphs, 250 to 400 words in total, separated by a blank line. Work through the "
+    "Each entry of 'pillar_narratives' is the WRITTEN ASSESSMENT of that pillar, given as a "
+    "LIST of THREE OR FOUR paragraphs, 250 to 400 words in total -- one string per "
+    "paragraph, never one long string. Work through the "
     "pillar theme by theme, in the order the evidence makes sense, and in each paragraph give "
     "what the report actually showed -- the figures, targets, certifications, policies, "
     "programmes and the pages they came from -- then say whether that is good or weak "
@@ -311,15 +312,15 @@ NARRATIVE_SYSTEM = (
     '{"executive_summary": "<3-4 sentences>", "key_rating_drivers": "<1 sentence>", '
     '"favourable_factors": "<one paragraph>", "constraints": "<one paragraph>", '
     '"disclosure_headline": "<1 sentence on how complete and specific the evidence is>", '
-    '"pillar_narratives": {"E": "<3-4 paragraphs, blank line between them>", '
-    '"S": "<3-4 paragraphs>", "G": "<3-4 paragraphs>"}, '
-    '"strengths": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
-    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
+    '"pillar_narratives": {"E": ["<paragraph>", "<paragraph>", "<paragraph>", '
+    '"<optional fourth>"], "S": [...], "G": [...]}, '
+    '"strengths": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
+    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
     '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
-    '"rating_rationale": "<2-3 paragraphs, blank line between them>", '
+    '"rating_rationale": ["<paragraph>", "<paragraph>", "<optional third>"], '
     '"rating_interpretation": "<2 sentences on how to read this grade>"}'
 )
-
+    
 # The drivers are asked for separately (production, 2026-09-21). Asked for together with
 # the pillar assessments, the model returned valid JSON with the pillars written and
 # strengths, weaknesses, priorities and the rationale simply absent -- about 2,500 words
@@ -330,10 +331,10 @@ DRIVERS_SYSTEM = (
     NARRATIVE_SYSTEM.split("Each entry of 'pillar_narratives'")[0]
     + "Plain professional English, short sentences. Respond in JSON with exactly these "
     "fields and no others: "
-    '{"strengths": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
-    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<70-120 words>"}, <4-5 items>], '
+    '{"strengths": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
+    '"weaknesses": [{"headline": "<6-12 words>", "detail": "<1000-1120 words>"}, <4-5 items>], '
     '"priorities": [{"area": "<pillar - theme>", "gap": "", "why": "", "action": ""}, <5 items>], '
-    '"rating_rationale": "<2-3 paragraphs, blank line between them>", '
+    '"rating_rationale": ["<paragraph>", "<paragraph>", "<optional third>"], '
     '"rating_interpretation": "<2 sentences on how to read this grade>"}'
 )
 
@@ -344,7 +345,7 @@ DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
 
 # Bumped whenever the shape above changes: the fingerprint is over the rating data, so
 # without it a report cached under the old shape would keep serving the old text.
-NARRATIVE_VERSION = 6
+NARRATIVE_VERSION = 7
 
 
 def _kpi_evidence(r: dict) -> str:
@@ -402,6 +403,26 @@ def _collection(kind: str):
     return esg_submissions_collection() if kind == "esg" else bfsi_store.submissions_collection()
 
 
+def _as_paragraphs(value) -> str:
+    """A block of prose as one string, whether the answer gave a list of paragraphs or
+    already joined them. Asked for as a list because a JSON string loses its blank lines,
+    and a pillar assessment then renders as one wall of text (production, 2026-09-23)."""
+    if isinstance(value, (list, tuple)):
+        return "\n\n".join(str(v).strip() for v in value if str(v).strip())
+    return str(value or "").strip()
+
+
+def _join_paragraphs(text: dict) -> dict:
+    """The narrative with its prose blocks normalised to blank-line-separated strings."""
+    out = dict(text or {})
+    if "rating_rationale" in out:
+        out["rating_rationale"] = _as_paragraphs(out["rating_rationale"])
+    pillars = out.get("pillar_narratives")
+    if isinstance(pillars, dict):
+        out["pillar_narratives"] = {c: _as_paragraphs(v) for c, v in pillars.items()}
+    return out
+
+
 def _require(answer, fields: tuple, what: str) -> None:
     """An answer that left fields out is a failure, not a result: cached once, an
     incomplete narrative would be served for the life of the report."""
@@ -450,7 +471,7 @@ def narrative(kind: str, doc: dict, facts: dict) -> dict:
         _require(text, NARRATIVE_REQUIRED, "rating summary")
         drivers_text = _ask_ai(kind, DRIVERS_SYSTEM, user)
         _require(drivers_text, DRIVERS_REQUIRED, "rating drivers")
-        text = {**text, **drivers_text}
+        text = _join_paragraphs({**text, **drivers_text})
     except Exception as e:
         logger.error("rating summary narrative failed: %s", e)
         raise HTTPException(502, "Couldn't write the rating summary text right now. Try again in a minute.")
