@@ -1,6 +1,7 @@
 # app/esg/scoring.py -- the ESG calculator's scoring (docs/ESG_SCORING_METHODOLOGY.md).
 import pytest
 
+from app.core.kpis import parse_kpi_list
 from app.esg import scoring
 
 KPIS = ["A", "B", "C", "D"]
@@ -214,3 +215,33 @@ def test_a_listed_reason_reaches_the_kpi_row_as_evidence():
     row = next(r for r in detail["kpis"] if r["kpi"] == "KPI 16")
     assert row["evidence"]["reason"] == "24 average training hours per employee"
     assert row["evidence"]["page"] == 12
+
+
+def test_every_kpi_is_sent_with_its_question_and_the_names_still_read_back(db):
+    """SCORE_GUIDE section 2 makes the Question the primary test, so it is sent with every
+    KPI -- on its own unnumbered line, because app/esg/pipeline.py reads the KPI names back
+    out of this prompt and the report keys every KPI, edit and reason on that exact name."""
+    for order, (sp, sp1, metric, question) in enumerate([
+        ("Emission", "Emissions I", "Emissions reduction policy", "Does the company have a policy?"),
+        ("Water", "Water II", "Water withdrawn", "Does the firm disclose water withdrawal?"),
+    ], 1):
+        db.esg_kpis.insert_one({"pillar": "E", "sub_pillar": sp, "sub_pillar_1": sp1,
+                                "metric": metric, "question": question, "order": order,
+                                "is_meta": False})
+    kpis = scoring.load_kpis("Environment")
+    text = scoring.kpi_list_text(kpis)
+
+    assert "    1. Emissions reduction policy\n       Question: Does the company have a policy?" in text
+    assert text.count("       Question: ") == 2
+    assert parse_kpi_list(text) == ["Emissions reduction policy", "Water withdrawn"]
+
+
+def test_the_scoring_guide_is_never_parsed_for_kpi_names():
+    """SCORE_GUIDE numbers its own sections, so a prompt that carries it must not be read
+    for KPI names -- "1. CORE PRINCIPLE" would become a KPI. pipeline.py parses the prompt
+    before the guide is added; this locks that in."""
+    listing = "Evaluate:\n1. Water withdrawn\n\nText:\n{text}"
+    assert parse_kpi_list(listing) == ["Water withdrawn"]
+    with_guide = scoring.with_score_guide(listing)
+    assert len(parse_kpi_list(with_guide)) > 1        # the guide's own numbered sections
+    assert "CORE PRINCIPLE" in parse_kpi_list(with_guide)

@@ -182,7 +182,12 @@ def with_kpi_list(prompt: str, kpis: list[dict]) -> str:
 def with_score_guide(prompt: str) -> str:
     """The category's scoring prompt with SCORE_GUIDE after its response fields (before
     "Text:"), and without the leftover "score" and "reason" fields it replaces
-    (_DROP_FIELDS). Apply it to the template, before the page text is filled in."""
+    (_DROP_FIELDS). Apply it to the template, before the page text is filled in.
+
+    Never read the KPI names back out of the result. SCORE_GUIDE numbers its own 32
+    sections, so app/core/kpis.py parse_kpi_list would take "1. CORE PRINCIPLE" and 40
+    others for KPIs. Parse scoring_prompt() instead, which is this prompt without the
+    guide -- that is what app/esg/pipeline.py does."""
     i = prompt.rfind("\n\nText:")
     head, tail = (prompt, "") if i == -1 else (prompt[:i], prompt[i:])
     return _DROP_FIELDS.sub("", head).rstrip("\n") + "\n" + SCORE_GUIDE + (tail or "\n")
