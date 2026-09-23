@@ -144,6 +144,12 @@ SECTOR_ALIASES = {
     "apparel": "Consumer Durables & Apparel", "textile": "Consumer Durables & Apparel",
     "textiles": "Consumer Durables & Apparel", "hotel": "Consumer Services",
     "hospitality": "Consumer Services", "tourism": "Consumer Services",
+    # The BFSI submission's own industry list (app/bfsi/options.py), which is not the CSE
+    # industry group names either.
+    "infrastructure": "Capital Goods", "vehicle": "Automobiles & Components",
+    "trade": "Retailing", "services": "Commercial & Professional Services",
+    "education": "Commercial & Professional Services",
+    "realestate": "Real Estate", "renewable": "Utilities",
     "food": "Food, Beverage & Tobacco", "beverage": "Food, Beverage & Tobacco",
     "agriculture": "Food, Beverage & Tobacco", "tea": "Food, Beverage & Tobacco",
     "plantation": "Food, Beverage & Tobacco", "tobacco": "Food, Beverage & Tobacco",
@@ -153,14 +159,16 @@ _STOPWORDS = {"and", "the", "of", "services", "products", "sector", "industry", 
 
 
 def _words(text: str) -> set[str]:
-    return {w for w in _key(text).split() if len(w) > 2 and w not in _STOPWORDS}
+    """The meaningful words of a sector name. "it" is kept despite its length: it is how
+    the BFSI form spells information technology."""
+    return {w for w in _key(text).split() if (len(w) > 2 or w == "it") and w not in _STOPWORDS}
 
 
 def _shares_stem(a: str, b: str) -> bool:
     """Whether two words are the same word: "banking"/"banks", "chemical"/"chemicals"."""
     n = min(len(a), len(b))
     if n < 4:
-        return a == b
+        return a == b   # "it" only ever matches "it"
     return a[:4] == b[:4] and (a.startswith(b) or b.startswith(a) or a[:5] == b[:5])
 
 
@@ -176,6 +184,11 @@ def sector_profile(sector: str) -> tuple[str, tuple] | None:
     for name, row in SECTOR_MATERIALITY.items():
         if _key(name) == wanted:
             return name, row
+    # The whole name as an alias, before it is split: "services" is a BFSI industry in its
+    # own right, but it is also a stopword inside "Commercial & Professional Services".
+    whole = SECTOR_ALIASES.get(wanted)
+    if whole:
+        return whole, SECTOR_MATERIALITY[whole]
     for word in _words(sector):
         for alias, name in SECTOR_ALIASES.items():
             if _shares_stem(word, alias):

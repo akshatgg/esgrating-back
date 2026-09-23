@@ -220,15 +220,19 @@ Text:
     assert fake.scoring_batches[2][0].startswith("Analyze the following text for governance performance.")
 
 
-def test_only_the_categories_a_unit_is_about_are_scored(monkeypatch):
-    """Step 0, the same as the ESG calculator: a unit is classified first and only that
-    category's KPIs are matched against it."""
+def test_every_unit_is_scored_against_all_three_categories(monkeypatch):
+    """CLASSIFY_GUIDE sections 3 and 18, the same as the ESG calculator: classification may
+    never keep a page out of KPI analysis, so there is no classification pass and every
+    unit goes to all three categories."""
     c = use(monkeypatch, FakeClient(categories=["Environment"]))
     out = pipeline.bfsi_analyze(SUBMISSION, PAGES)
-    assert len(c.scoring_batches) == 1
-    assert all("environmental performance" in p for p in c.scoring_batches[0].values())
-    # UNIT scores point 1 = 90 and point 2 = 30 of the 18 built-in E criteria: 120 / 1800.
-    assert out["e_score"] == 6.67 and out["s_score"] == 0.0 and out["g_score"] == 0.0
+    assert len(c.scoring_batches) == 3
+    kinds = [next(iter(b.values())) for b in c.scoring_batches]
+    assert sum("environmental performance" in p for p in kinds) == 1
+    assert sum("social performance" in p for p in kinds) == 1
+    assert sum("governance performance" in p for p in kinds) == 1
+    # Every category is scored now, not only the classified one.
+    assert out["e_score"] > 0 and out["s_score"] > 0 and out["g_score"] > 0
     assert out["scoring_method"] == "kpi_score"
 
 
