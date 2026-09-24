@@ -251,9 +251,57 @@ def _band(pct: float, high: float, moderate: float) -> str:
 # Two calls, not one, is kept from the previous implementation (production, 2026-09-21):
 # asked for everything at once the model returned the pillar narratives and simply omitted
 # the drivers. His DRIVERS_SYSTEM is written as its own engine, so it is the second call.
-NARRATIVE_SYSTEM = prompts.load("narrative_system")
+# His section 26 asks for "5 short explanatory strings". The report is a client document
+# where Strengths and Gaps is the part people read, and a one-line strength reads as a
+# restated KPI name rather than an assessment (user, 2026-09-24). LENGTH keeps his shape
+# exactly -- the same fields, the same five items, still plain strings -- and only says how
+# much each one must say. No field is added, removed or renamed.
+LENGTH = (
+    "\n\n"
+    "========================================================\n"
+    "LENGTH OF EACH STRENGTH AND EACH WEAKNESS\n"
+    "========================================================\n"
+    "Each of the five strengths and each of the five weaknesses is a written paragraph of "
+    "180 to 220 words, not a phrase and not a sentence. Five of each, so roughly 1,000 "
+    "words of strengths and 1,000 words of weaknesses in total.\n"
+    "\n"
+    "Write each one as a rating analyst writes: open by naming the driver in the company's "
+    "own terms, not as a KPI name; give what the evidence actually showed -- the figures, "
+    "the targets, the certifications, the assurance, the incidents -- and say what it "
+    "demonstrates about the company's management or performance; then say what it means "
+    "for this rating.\n"
+    "\n"
+    "Do NOT list KPI names one after another. Do NOT write 'scores 100 in X, Y and Z'. A "
+    "reader who never sees the KPI table must still understand what the company does well "
+    "and where it falls short, and why. Quote a score only where it carries the point.\n"
+    "\n"
+    "Group related KPIs into one driver rather than writing one paragraph per KPI, and "
+    "never repeat a driver already covered. Every figure and every claim must come from "
+    "the validated data supplied; the length requirement is not a licence to invent.\n"
+    "\n"
+    "========================================================\n"
+    "LENGTH OF EACH PILLAR NARRATIVE\n"
+    "========================================================\n"
+    "Each of the three pillar narratives -- E, S and G -- is the written assessment of "
+    "that pillar: 250 to 400 words, several paragraphs, separated by a blank line.\n"
+    "\n"
+    "Work through the pillar theme by theme, in the order the evidence makes sense. In "
+    "each paragraph give what the report actually showed -- the figures, targets, "
+    "certifications, policies and programmes -- then say whether that is good or weak "
+    "performance and why. Say plainly where the company does well and where it falls "
+    "short, and close the pillar by linking what you described to the score it received.\n"
+    "\n"
+    "Continuous prose. Never a list of KPI names, never a sentence whose subject is a KPI "
+    "name or a score. Where a pillar's evidence is thin, say so and say what is missing "
+    "rather than padding the paragraphs.\n"
+    "\n"
+    "'executive_summary', 'rating_rationale' and 'rating_interpretation' keep the lengths "
+    "given above; only the strengths, the weaknesses and the pillar narratives change."
+)
 
-DRIVERS_SYSTEM = prompts.load("drivers_system")
+NARRATIVE_SYSTEM = prompts.load("narrative_system") + LENGTH
+
+DRIVERS_SYSTEM = prompts.load("drivers_system") + LENGTH
 
 # His narrative section 26 and drivers section 28 fields. An answer missing them is not
 # stored: a half-written narrative cached once would be served for the life of the report.
@@ -265,7 +313,7 @@ DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
 # His versioning note: a unique version string, incremented whenever NARRATIVE_SYSTEM,
 # DRIVERS_SYSTEM, SCORE_GUIDE, CLASSIFY_GUIDE, the KPI scoring logic, the KPI library or
 # the methodology changes, so a summary generated under older logic is never served again.
-NARRATIVE_VERSION = "CFC_ESG_RATING_V1.0_2026_09_24"
+NARRATIVE_VERSION = "CFC_ESG_RATING_V1.1_2026_09_24"
 
 # The engines that produced a rating, stored with it so CFC can identify later exactly
 # which logic issued any past assessment (his versioning note).
