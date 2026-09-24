@@ -119,13 +119,14 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     assert "1 | Environment - Waste | No waste policy | Waste is 0 | Publish the waste policy" in text
     assert "35% Environment + 30% Social + 35% Governance" in text
 
-    # The AI text is cached until the scores change. Writing it takes two calls: the
-    # summary and pillar assessments, then the drivers.
+    # The AI text is cached until the scores change. Writing it takes one call per pass
+    # (app/reports/summary.py PASSES): the summary and pillar assessments, the strengths,
+    # the weaknesses, then the rating rationale.
     admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
-    assert len(fake_ai) == 2
+    assert len(fake_ai) == len(summary.PASSES)
     db.esg_submissions.update_one({"_id": sid}, {"$set": {"final.environmental_score": 50}})
     admin_client.get(f"/api/admin/esg/submissions/{sid}/summary")
-    assert len(fake_ai) == 4
+    assert len(fake_ai) == len(summary.PASSES) * 2   # the scores changed, so it writes again
 
 
 def test_bfsi_summary_uses_cin_loan_type_and_weights(admin_client, db, fake_ai):

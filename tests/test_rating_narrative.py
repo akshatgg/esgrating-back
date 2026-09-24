@@ -36,7 +36,7 @@ def test_write_narrative_stores_the_text(admin_client, db, ai):
     assert stored["text"]["strengths"][0] == "Water withdrawn (90)"
     assert stored["fingerprint"] and stored["generated_at"]
     # Two calls now: the summary and pillar assessments, then the drivers.
-    assert len(ai) == 2
+    assert len(ai) == len(summary.PASSES)
 
 
 def test_write_narrative_is_skipped_without_a_key(admin_client, db, ai, monkeypatch):
@@ -105,16 +105,18 @@ def test_a_changed_shape_does_not_reuse_old_cached_text(admin_client, db, ai, mo
     monkeypatch.setattr(summary, "NARRATIVE_VERSION", "CFC_ESG_RATING_V9.9_2099_01_01")
     summary.write_narrative("esg", db.esg_submissions.find_one({"_id": sid}))
     assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["fingerprint"] != first
-    assert len(ai) == 4  # two generations, two calls each
+    assert len(ai) == len(summary.PASSES) * 2  # two generations, one call per pass
 
 
 # --- a half-written answer (production, 2026-09-21) ---------------------------------
 
 def _half_answer(system, _user):
-    """What production returned: valid JSON with the pillar assessments written and the
-    drivers simply absent. Asked for together, ~2,500 words was more than it would give."""
-    if "pillar_narratives" in system:
-        return {k: NARRATIVE[k] for k in summary.NARRATIVE_REQUIRED}
+    """What production returned: valid JSON with a pass's own field simply absent. Asked
+    for together, ~2,500 words was more than the model would give, which is why the
+    narrative is written in passes."""
+    if "THIS REQUEST" in system and '"executive_summary"' in system.rsplit("THIS REQUEST", 1)[1]:
+        return {"executive_summary": NARRATIVE["executive_summary"],
+                "pillar_narratives": NARRATIVE["pillar_narratives"]}
     return {}
 
 
@@ -134,15 +136,19 @@ def test_the_drivers_come_from_their_own_call(admin_client, db, ai):
     summary.write_narrative("esg", db.esg_submissions.find_one({"_id": sid}))
 
     systems = [s for _kind, s, _user in ai]
-    assert len(systems) == 2
-    assert "pillar_narratives" in systems[0] and "pillar_narratives" not in systems[1]
-    assert '"strengths"' in systems[1]
+    assert len(systems) == len(summary.PASSES)
+    # Each pass asks for its own fields and says to leave the rest out, so no single
+    # answer has to carry the whole narrative.
+    asks = [s.rsplit("THIS REQUEST", 1)[1] for s in systems]
+    assert '"executive_summary"' in asks[0] and '"strengths"' not in asks[0]
+    assert '"strengths"' in asks[1] and '"weaknesses"' in asks[2]
+    assert '"rating_rationale"' in asks[3]
 
     text = db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
     assert text["pillar_narratives"] and isinstance(text["strengths"][0], str)
 
 
-@pytest.mark.parametrize("missing", summary.NARRATIVE_REQUIRED)
+@pytest.mark.parametrize("missing", ("executive_summary", "pillar_narratives"))
 def test_the_summary_call_must_answer_with_every_field(admin_client, db, monkeypatch, missing):
     monkeypatch.setattr(settings, "esg_openai_api_key", "test-key")
     answer = {k: v for k, v in NARRATIVE.items() if k != missing}
@@ -222,7 +228,7 @@ def test_generate_reports_writes_the_narrative(admin_client, db, ai):
 
     body = admin_client.post(f"/api/admin/esg/submissions/{sid}/reports").json()
     assert body["narrative"]["strengths"][0] == "Water withdrawn (90)"
-    assert len(ai) == 2
+    assert len(ai) == len(summary.PASSES)
     assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
 
 

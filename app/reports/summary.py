@@ -301,25 +301,67 @@ LENGTH = (
     "name or a score. Where a pillar's evidence is thin, say so and say what is missing "
     "rather than padding the paragraphs.\n"
     "\n"
-    "'executive_summary', 'rating_rationale' and 'rating_interpretation' keep the lengths "
-    "given above; only the strengths, the weaknesses and the pillar narratives change."
+    "========================================================\n"
+    "LENGTH OF THE RATING RATIONALE\n"
+    "========================================================\n"
+    "'rating_rationale' is the report's Scoring Rationale, read by anyone who asks how the "
+    "scores were arrived at. It is AT LEAST 1,000 words, several paragraphs separated by a "
+    "blank line -- again a minimum, not a target.\n"
+    "\n"
+    "Take each pillar in turn. For each one say what its evidence actually showed, which "
+    "KPIs carried the score and which were missing or weak, and how that produced the "
+    "pillar's number. Then close with how the three weigh together into the overall score "
+    "and the grade it maps to, and name anything that held the rating back.\n"
+    "\n"
+    "Continuous prose, no page-by-page listing and no bare KPI names. Every figure comes "
+    "from the validated scorecard: never restate a score as a different number, and never "
+    "reach the length by repeating a point already made.\n"
+    "\n"
+    "'executive_summary' and 'rating_interpretation' keep the lengths given above; only "
+    "the strengths, the weaknesses, the pillar narratives and the rating rationale change."
 )
 
 NARRATIVE_SYSTEM = prompts.load("narrative_system") + LENGTH
 
 DRIVERS_SYSTEM = prompts.load("drivers_system") + LENGTH
 
-# His narrative section 26 and drivers section 28 fields. An answer missing them is not
-# stored: a half-written narrative cached once would be served for the life of the report.
-NARRATIVE_REQUIRED = ("executive_summary", "pillar_narratives", "rating_rationale")
-DRIVERS_REQUIRED = ("strengths", "weaknesses", "rating_rationale")
+# His section 26 asks for every field in one answer. That was already too much before the
+# length minimums -- production returned valid JSON with the drivers simply absent, which
+# is why this was split in two on 2026-09-21 -- and the minimums make one answer roughly
+# 4,000 words. So the narrative is asked for in four passes, each a manageable answer, and
+# each pass is told which of his fields to return. His prompt and his field names are
+# unchanged; only how many fields are requested at a time.
+#
+# An answer that leaves its fields out is a failure, not a result: cached once, an
+# incomplete narrative would be served for the life of the report.
+PASSES = (
+    ("the summary and pillar assessments",
+     ("executive_summary", "pillar_narratives"),
+     ("key_rating_drivers", "disclosure_headline", "rating_interpretation")),
+    ("the strengths", ("strengths",), ()),
+    ("the weaknesses", ("weaknesses",), ()),
+    ("the rating rationale", ("rating_rationale",), ("priorities",)),
+)
+
+# Appended per pass so the model answers one part at a time. It narrows what is asked for;
+# it does not change what any field must contain.
+def _only(required: tuple, optional: tuple) -> str:
+    fields = ", ".join(f'"{f}"' for f in required + optional)
+    return ("\n\n"
+            "========================================================\n"
+            "THIS REQUEST\n"
+            "========================================================\n"
+            "Return JSON holding ONLY these fields: " + fields + ".\n"
+            "Leave every other field out of this answer entirely -- they are asked for "
+            "separately. Everything above still applies to the fields you do return, "
+            "including their required length.")
 
 # Bumped whenever the shape above changes: the fingerprint is over the rating data, so
 # without it a report cached under the old shape would keep serving the old text.
 # His versioning note: a unique version string, incremented whenever NARRATIVE_SYSTEM,
 # DRIVERS_SYSTEM, SCORE_GUIDE, CLASSIFY_GUIDE, the KPI scoring logic, the KPI library or
 # the methodology changes, so a summary generated under older logic is never served again.
-NARRATIVE_VERSION = "CFC_ESG_RATING_V1.1_2026_09_24"
+NARRATIVE_VERSION = "CFC_ESG_RATING_V1.2_2026_09_25"
 
 # The engines that produced a rating, stored with it so CFC can identify later exactly
 # which logic issued any past assessment (his versioning note).
@@ -452,11 +494,16 @@ def narrative(kind: str, doc: dict, facts: dict) -> dict:
     if cached.get("fingerprint") == fingerprint and isinstance(cached.get("text"), dict):
         return cached["text"]
     try:
-        text = _ask_ai(kind, NARRATIVE_SYSTEM, user)
-        _require(text, NARRATIVE_REQUIRED, "rating summary")
-        drivers_text = _ask_ai(kind, DRIVERS_SYSTEM, user)
-        _require(drivers_text, DRIVERS_REQUIRED, "rating drivers")
-        text = _join_paragraphs({**text, **drivers_text})
+        text = {}
+        for what, required, optional in PASSES:
+            # The drivers prompt is his engine for the strengths, weaknesses, priorities
+            # and rationale; the narrative prompt covers the summary and the pillars.
+            system = DRIVERS_SYSTEM if required[0] in ("strengths", "weaknesses", "rating_rationale") \
+                else NARRATIVE_SYSTEM
+            answer = _ask_ai(kind, system + _only(required, optional), user)
+            _require(answer, required, what)
+            text.update(answer)
+        text = _join_paragraphs(text)
     except Exception as e:
         logger.error("rating summary narrative failed: %s", e)
         raise HTTPException(502, "Couldn't write the rating summary text right now. Try again in a minute.")
