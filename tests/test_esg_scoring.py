@@ -244,17 +244,21 @@ def test_the_scoring_guide_is_never_parsed_for_kpi_names():
     assert "CORE PRINCIPLE" in parse_kpi_list(with_guide)
 
 
-def test_the_llm_provider_switches_between_openai_and_bedrock(monkeypatch):
-    """The same OpenAI models can be reached through Bedrock, which authenticates with the
-    AWS credential chain instead of an OpenAI key, so the usage bills to AWS."""
+def test_the_llm_provider_switches_between_openai_and_bedrock(monkeypatch, db):
+    """The provider decides which client scores a page.
+
+    OpenAI is the OpenAI API. AWS goes through Bedrock's Converse API, not the
+    OpenAI-compatible endpoint: that one serves only the gpt-5.6 and gpt-6 families and
+    rejects everything else with "isn't supported on this endpoint"."""
+    from app.core import bedrock as bedrock_mod
     from app.core import llm_settings
+    from app.core.bedrock import BedrockModel
     from app.core.config import settings
     from app.esg import llm as llm_mod
 
     monkeypatch.setattr(settings, "esg_openai_api_key", "test-key")
     monkeypatch.setattr(settings, "esg_openai_model", "gpt-4.1-mini")
-    monkeypatch.setattr(settings, "esg_bedrock_model", "openai.gpt-5.6-luna")
-    monkeypatch.setattr(settings, "bedrock_region", "ap-south-1")
+    monkeypatch.setattr(settings, "esg_bedrock_model", "openai.gpt-oss-120b-1:0")
 
     monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.OPENAI)
     monkeypatch.setattr(llm_mod, "_llm", None)
@@ -266,7 +270,25 @@ def test_the_llm_provider_switches_between_openai_and_bedrock(monkeypatch):
     # and sends the Bedrock model id rather than the OpenAI one.
     monkeypatch.setattr(llm_mod.llm_settings, "resolve", lambda: llm_settings.AWS)
     viaws = llm_mod.get_llm()
-    assert viaws is not direct and viaws.provider == llm_settings.AWS
-    assert viaws.model == "openai.gpt-5.6-luna"
-    assert "api.openai.com" not in str(viaws.clients.base_url)
-    assert "ap-south-1" in str(viaws.clients.base_url)
+    assert isinstance(viaws, BedrockModel)
+    assert viaws.provider == llm_settings.AWS
+    assert viaws.model == "openai.gpt-oss-120b-1:0"
+    assert viaws.api_key == ""            # no OpenAI key is involved
+
+
+def test_an_admin_can_pick_which_bedrock_model_scores(monkeypatch, db):
+    """Which models an account may invoke differs by account and region, so it is a
+    setting. Only a model the account can actually invoke is accepted -- storing one it
+    cannot would fail every page of the next report instead of failing here."""
+    from app.core import bedrock as bedrock_mod
+    from app.core import llm_settings
+    from app.core.errors import UserError
+
+    monkeypatch.setattr(bedrock_mod, "usable_models",
+                        lambda refresh=False: [{"id": "openai.gpt-oss-120b-1:0",
+                                                "name": "gpt-oss-120b", "provider": "OpenAI"}])
+    llm_settings.set_bedrock_model("openai.gpt-oss-120b-1:0", "admin")
+    assert llm_settings.bedrock_model() == "openai.gpt-oss-120b-1:0"
+
+    with pytest.raises(UserError):
+        llm_settings.set_bedrock_model("openai.gpt-5.6-luna", "admin")   # not yet available

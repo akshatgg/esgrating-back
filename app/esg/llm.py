@@ -7,24 +7,11 @@ from app.core import llm_settings
 from app.core.config import settings
 
 
-def _client(api_key: str, provider: str):
-    """The OpenAI client for a provider.
-
-    llm_settings.AWS reaches the same OpenAI models through Amazon Bedrock, authenticating
-    with the AWS credential chain (api_key=None) -- on the server that is the IAM user
-    whose keys deploy.sh already writes into the container, so no OpenAI key is involved
-    and the usage draws on AWS. Otherwise it is the OpenAI API, unchanged."""
-    if provider == llm_settings.AWS:
-        from openai.providers import bedrock
-        return OpenAI(provider=bedrock(region=settings.bedrock_region, api_key=None))
-    return OpenAI(api_key=api_key)
-
-
 def model_for(provider: str) -> str:
     """The model id for a provider. Bedrock names the same models differently, so each has
     its own setting and neither can be sent to the wrong endpoint."""
     if provider == llm_settings.AWS:
-        return settings.esg_bedrock_model
+        return llm_settings.bedrock_model()
     return settings.esg_openai_model
 
 
@@ -33,7 +20,7 @@ class GPTModel:
         self.api_key = api_key
         self.model = model
         self.provider = provider
-        self.clients = client if client is not None else _client(api_key, provider)
+        self.clients = client if client is not None else OpenAI(api_key=api_key)
 
     def generate_score(self, text):
         try:
@@ -56,12 +43,20 @@ class GPTModel:
 _llm = None
 
 
-def get_llm() -> GPTModel:
+def get_llm():
+    """The scoring model for the configured provider.
+
+    Read on every call: an admin changing the provider or model on the dashboard takes
+    effect on the next analysis, not the next restart. Bedrock goes through Converse
+    (app/core/bedrock.py), not the OpenAI-compatible endpoint, which serves only the
+    gpt-5.6 and gpt-6 families and rejects everything else."""
     global _llm
-    # Read on every call: an admin changing the provider on the dashboard takes effect on
-    # the next analysis, not the next restart.
     provider = llm_settings.resolve()
     key, model = settings.esg_openai_api_key, model_for(provider)
     if _llm is None or (_llm.api_key, _llm.model, _llm.provider) != (key, model, provider):
-        _llm = GPTModel(key, model, provider=provider)
+        if provider == llm_settings.AWS:
+            from app.core.bedrock import BedrockModel
+            _llm = BedrockModel(model)
+        else:
+            _llm = GPTModel(key, model, provider=provider)
     return _llm

@@ -219,9 +219,35 @@ def materiality_of(theme: str, sector: str, category: str) -> str:
     return DEFAULT_MATERIALITY
 
 
+# Matched in order, most specific first, because the model describes the evidence in its
+# own words -- "measured performance data", "implementation programme", "policy statement"
+# -- not in the exact labels of SCORE_GUIDE section 30. An exact-match table silently sent
+# all of those to the default and switched the 8.3 weighting off.
+_EVIDENCE_PATTERNS = (
+    (("assured", "verified", "independent", "certif", "audited"), 1.60),
+    (("measured", "outcome", "result", "quantified", "performance"), 1.50),
+    (("target", "commitment", "committed", "pledge"), 1.25),
+    (("implement", "programme", "program", "management process", "initiative"), 1.20),
+    (("policy", "strategy", "framework", "governance"), 1.00),
+    (("compliance", "basic", "supporting", "insufficient", "mention"), 0.75),
+)
+
+
 def evidence_weight(evidence_type: str) -> float:
-    """8.3: the relative weight of the kind of evidence behind an indicator score."""
-    return EVIDENCE_WEIGHTS.get(_key(evidence_type), DEFAULT_EVIDENCE_WEIGHT)
+    """8.3: the relative weight of the kind of evidence behind an indicator score.
+
+    "Negative performance" weighs the same as any measured performance: the outcome is
+    simply adverse, and section 16 requires it to count, not to be discounted."""
+    text = _key(evidence_type)
+    if not text:
+        return DEFAULT_EVIDENCE_WEIGHT
+    exact = EVIDENCE_WEIGHTS.get(text)
+    if exact is not None:
+        return exact
+    for words, weight in _EVIDENCE_PATTERNS:
+        if any(w in text for w in words):
+            return weight
+    return DEFAULT_EVIDENCE_WEIGHT
 
 
 def indicator_weight(evidence_type: str, materiality: str) -> float:

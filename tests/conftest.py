@@ -31,8 +31,11 @@ def openai_provider(monkeypatch):
     any developer machine with a profile -- which would send every test through the Bedrock
     model id and make the suite depend on whose laptop it runs on. A test that wants AWS
     asks for it."""
-    from app.core import llm_settings
+    from app.core import bedrock, llm_settings
     monkeypatch.setattr(llm_settings, "resolve", lambda: llm_settings.OPENAI)
+    # No test talks to Bedrock. Listing models is ~50 AWS calls; a test that wants a list
+    # provides its own.
+    monkeypatch.setattr(bedrock, "usable_models", lambda refresh=False: [])
 
 
 @pytest.fixture

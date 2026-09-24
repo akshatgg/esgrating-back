@@ -263,3 +263,23 @@ def test_without_the_library_the_score_is_the_flat_average_it_always_was():
     detail = scoring.category_detail([(1, {"A": 80, "B": 20})], kpis)
     assert detail["score"] == 50.0 and "weighting" not in detail
     assert all("materiality" not in r for r in detail["kpis"])
+
+
+@pytest.mark.parametrize("described, weight", [
+    # The exact labels of SCORE_GUIDE section 30.
+    ("Policy/Strategy", 1.00), ("Implementation", 1.20), ("Target", 1.25),
+    ("Measured Performance", 1.50), ("Verified Outcome", 1.60), ("Supporting Evidence", 0.75),
+    # How a model actually writes them, which is not those labels. Matching these exactly
+    # is what the weighting depends on: a miss sends everything to 1.00 and switches 8.3
+    # off without any sign that it happened.
+    ("policy statement", 1.00), ("implementation programme", 1.20),
+    ("Target/Commitment", 1.25), ("measured performance data", 1.50),
+    ("externally assured results", 1.60), ("independently verified", 1.60),
+    ("quantified outcome", 1.50), ("compliance with regulation", 0.75),
+    # An adverse outcome is measured performance; section 16 makes it count, not discount.
+    ("Negative Performance", 1.50),
+    # Anything unrecognised sits at the default rather than the best or worst weight.
+    ("something new", 1.00), (None, 1.00), ("", 1.00),
+])
+def test_evidence_weight_reads_how_a_model_actually_describes_evidence(described, weight):
+    assert m.evidence_weight(described) == weight

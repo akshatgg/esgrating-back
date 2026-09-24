@@ -16,12 +16,6 @@ logger = logging.getLogger(__name__)
 
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
-# Bedrock serves the same OpenAI models behind an OpenAI-compatible endpoint, so only the
-# URL and the signature change -- every retry count, sleep length and fatal-error rule of
-# the PHP port stays exactly as it was.
-def bedrock_url(region: str) -> str:
-    return f"https://bedrock-mantle.{region}.api.aws/openai/v1/chat/completions"
-
 # How many scoring requests to keep in flight at once (openai.php:13).
 BFSI_CONCURRENCY = 8
 
@@ -73,40 +67,26 @@ class OpenAiJson:
     def _client(self) -> httpx.Client:
         return httpx.Client(timeout=TIMEOUT, transport=self._transport)
 
-    def _request(self, payload: str) -> tuple[str, dict]:
-        """(url, headers) for the configured provider.
-
-        AWS signs the request with SigV4 from the AWS credential chain, so no OpenAI key is
-        sent and the usage draws on AWS. OpenAI sends the bearer key, as the port always
-        did."""
-        body = payload.encode("utf-8")
-        if self.provider != llm_settings.AWS:
-            return OPENAI_URL, {"Content-Type": "application/json",
-                                "Authorization": "Bearer " + self.api_key}
-        import boto3
-        from botocore.auth import SigV4Auth
-        from botocore.awsrequest import AWSRequest
-
-        region = settings.bedrock_region
-        url = bedrock_url(region)
-        creds = boto3.Session().get_credentials().get_frozen_credentials()
-        signed = AWSRequest(method="POST", url=url, data=body,
-                            headers={"Content-Type": "application/json"})
-        SigV4Auth(creds, "bedrock", region).add_auth(signed)
-        return url, dict(signed.headers)
-
     def _send(self, client: httpx.Client, payload: str) -> tuple[int, str | None]:
-        """(http status, body). A transport failure is curl's code 0 with no body."""
+        """(http status, body). A transport failure is curl's code 0 with no body.
+
+        This is the OpenAI API only. Bedrock is a different client entirely
+        (app/core/bedrock.py): its models are served by Converse, not by the
+        OpenAI-compatible endpoint."""
         try:
-            url, headers = self._request(payload)
-            r = client.post(url, content=payload.encode("utf-8"), headers=headers)
+            r = client.post(
+                OPENAI_URL,
+                content=payload.encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + self.api_key,
+                },
+            )
             return r.status_code, r.text
         except httpx.HTTPError as e:
             logger.error("bfsi: %s request failed: %s", self.provider, e)
             return 0, None
-        except Exception as e:                      # signing, credentials
-            logger.error("bfsi: could not build the %s request: %s", self.provider, e)
-            return 0, None
+
 
     # --- bfsi_openai_parse ---------------------------------------------------
     @staticmethod
@@ -226,13 +206,24 @@ class OpenAiJson:
 _client: OpenAiJson | None = None
 
 
-def get_client() -> OpenAiJson:
+def get_client():
+    """The scoring client for the configured provider.
+
+    Read on every call: an admin changing the provider or model on the dashboard takes
+    effect on the next analysis. AWS goes through Bedrock's Converse API
+    (app/core/bedrock.py); the OpenAI-compatible endpoint serves only the gpt-5.6 and
+    gpt-6 families and rejects the rest."""
     global _client
-    # Read on every call: an admin changing the provider on the dashboard takes effect on
-    # the next analysis, not the next restart.
     provider = llm_settings.resolve()
     key = settings.bfsi_openai_api_key
-    model = settings.bfsi_bedrock_model if provider == llm_settings.AWS else settings.bfsi_openai_model
-    if _client is None or (_client.api_key, _client.model, _client.provider) != (key, model, provider):
+    if provider == llm_settings.AWS:
+        model = llm_settings.bedrock_model()
+        if _client is None or (_client.model, getattr(_client, "provider", "")) != (model, "aws"):
+            from app.core.bedrock import BedrockModel
+            _client = BedrockModel(model)
+        return _client
+    model = settings.bfsi_openai_model
+    if (_client is None or getattr(_client, "provider", "") == "aws"
+            or (_client.api_key, _client.model) != (key, model)):
         _client = OpenAiJson(key, model, provider=provider)
     return _client

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 COLLECTION = "app_settings"
 KEY = "llm_provider"
+MODEL_KEY = "bedrock_model"
 
 AWS = "aws"
 OPENAI = "openai"
@@ -49,6 +50,37 @@ def stored() -> str | None:
 def provider() -> str:
     """The configured provider, defaulting to AWS."""
     return stored() or DEFAULT
+
+
+def bedrock_model() -> str:
+    """The Bedrock model an admin picked, else the configured default.
+
+    Which models an account may actually invoke differs by account and region, so this is a
+    setting rather than a constant -- see app/core/bedrock.py usable_models()."""
+    from app.core.config import settings
+
+    doc = get_db()[COLLECTION].find_one({"key": MODEL_KEY})
+    value = (doc or {}).get("value")
+    return value if isinstance(value, str) and value.strip() else settings.esg_bedrock_model
+
+
+def set_bedrock_model(value: str, admin: str = "") -> str:
+    """Store the Bedrock model an admin picked. Only a model this account may invoke is
+    accepted: storing one it cannot would fail every call at analysis time instead of here."""
+    from app.core import bedrock
+
+    value = (value or "").strip()
+    allowed = {m["id"] for m in bedrock.usable_models()}
+    if value not in allowed:
+        raise UserError("That model is not available to this AWS account in this region.")
+    from datetime import datetime, timezone
+    get_db()[COLLECTION].update_one(
+        {"key": MODEL_KEY},
+        {"$set": {"value": value, "updated_at": datetime.now(timezone.utc), "updated_by": admin}},
+        upsert=True,
+    )
+    logger.info("bedrock model set to %s by %s", value, admin or "?")
+    return value
 
 
 def set_provider(value: str, admin: str = "") -> str:
