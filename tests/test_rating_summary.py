@@ -261,17 +261,20 @@ def test_the_word_summary_cannot_clip_or_slice_its_content(admin_client, db, fak
     data = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content
     d = docx.Document(io.BytesIO(data))
 
-    heights = capped = split = 0
+    heights = capped = kept = 0
     for t in d.tables:
         for r in t.rows:
             pr = r._tr.trPr
-            assert pr is not None and pr.findall(qn("w:cantSplit")), "a row may still split across a page"
-            split += 1
+            assert pr is not None
+            # A row short enough to fit a page is kept whole.
+            if sum(len(c.text) for c in r.cells) <= summary.SPLITTABLE_FROM:
+                assert pr.findall(qn("w:cantSplit")), "a short row may still be sliced"
+                kept += 1
             for h in pr.findall(qn("w:trHeight")):
                 heights += 1
                 if h.get(qn("w:hRule")) != "atLeast":
                     capped += 1
-    assert split > 0 and heights > 0
+    assert kept > 0 and heights > 0
     assert capped == 0, f"{capped} rows keep a height that can clip their text"
     # Each table repeats its header when it does run over a page.
     assert all(t.rows[0]._tr.trPr.findall(qn("w:tblHeader")) for t in d.tables if t.rows)
@@ -299,3 +302,25 @@ def test_the_word_summary_carries_the_analysts_corrections(admin_client, db, fak
     assert "One matter is under review." in text           # any slot, by key
     # Untouched headings keep the client's wording exactly.
     assert "1. Pillar Assessment" in text and "6. Rating Interpretation & Methodology Notes" in text
+
+
+def test_a_row_too_tall_for_a_page_is_left_free_to_flow(admin_client, db, monkeypatch):
+    """cantSplit on a row taller than the page is destructive: it may not break, cannot
+    fit, and the overflow is simply not drawn. That lost the whole strengths and weaknesses
+    box once those became 1,000 words each (user, 2026-09-25), so a long row keeps the
+    right to flow onto the next page."""
+    long_text = {**TEXT,
+                 "strengths": ["Strength. " * 120 for _ in range(5)],
+                 "weaknesses": ["Weakness. " * 120 for _ in range(5)]}
+    monkeypatch.setattr(summary, "_ask_ai", lambda kind, system, user: dict(long_text))
+    sid = _esg(db)
+    d = docx.Document(io.BytesIO(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content))
+
+    tall = [r for t in d.tables for r in t.rows
+            if sum(len(c.text) for c in r.cells) > summary.SPLITTABLE_FROM]
+    assert tall, "the fixture did not produce a row long enough to test"
+    for r in tall:
+        assert not r._tr.trPr.findall(qn("w:cantSplit")), \
+            "a row too tall for a page must be allowed to break, or its text is lost"
+    # And the text really is in the document rather than clipped away.
+    assert "Strength." in _text_of(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content)

@@ -795,6 +795,12 @@ def _retitle(document, headings: dict) -> None:
             _set_paragraph(p, new)
 
 
+# Characters in a row beyond which it is allowed to break across a page. A page of this
+# template holds roughly 3,500 characters of table text; the limit is set below that so a
+# row near the boundary still flows rather than risking a clip.
+SPLITTABLE_FROM = 2000
+
+
 def _keep_whole(document) -> None:
     """Stop the Word summary clipping or slicing its content.
 
@@ -816,7 +822,13 @@ def _keep_whole(document) -> None:
             for tag in ("cantSplit", "trHeight"):
                 for el in tr_pr.findall(qn("w:" + tag)):
                     tr_pr.remove(el)
-            tr_pr.append(OxmlElement("w:cantSplit"))
+            # cantSplit only where the row can actually fit on a page. On a row taller
+            # than the page it is destructive: the row may not break, cannot fit, and the
+            # overflow is simply not drawn -- which lost the whole strengths and weaknesses
+            # box once those became 1,000 words each (user, 2026-09-25). A long row is left
+            # free to flow onto the next page, which is the only way to keep its text.
+            if sum(len(c.text) for c in row.cells) <= SPLITTABLE_FROM:
+                tr_pr.append(OxmlElement("w:cantSplit"))
             if height is not None:
                 h = OxmlElement("w:trHeight")
                 h.set(qn("w:val"), str(getattr(height, "twips", None) or int(height)))
