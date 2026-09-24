@@ -31,6 +31,7 @@ from app.bfsi import store as bfsi_store
 from app.bfsi.options import INDUSTRIES
 from app.bfsi.scoring import bfsi_overall, is_kpi_scored
 from app.core.config import settings
+from app.esg import methodology
 from app.core.db import get_db
 from app.esg import scoring
 from app.esg.submissions import esg_submissions_collection
@@ -175,7 +176,12 @@ def build_facts(kind: str, doc: dict) -> dict:
                  "pages": r.get("pages") or [], "evidence": r.get("evidence") or {},
                  # A score held down to 20 by a poor page reads as a contradiction next to
                  # its own strong evidence unless the writer is told why.
-                 "capped": bool(r.get("capped"))}
+                 "capped": bool(r.get("capped")),
+                 # From the methodology roll-up (app/esg/scoring.py category_detail): what
+                 # kind of evidence carried the score, and how material the indicator is
+                 # for this sector. Both are blank on reports scored before that existed.
+                 "evidence_type": str(r.get("evidence_type") or ""),
+                 "materiality": str(r.get("materiality") or "")}
                 for r in (coverage.get(name) or {}).get("kpis") or []]
         lookup = _themes_lookup(code)
         themes = {}
@@ -210,15 +216,39 @@ def build_facts(kind: str, doc: dict) -> dict:
             "name": name, "score": scores[code], "grade": grade, "label": label, "themes": theme_list,
             "kpi_total": float(detail.get("score") or 0), "manual": detail.get("analyst_score") is not None,
             "strong": strong[:NARRATIVE_KPIS], "gaps": gaps[:NARRATIVE_KPIS], "kpi_count": len(rows),
+            "rows": rows,
         }
         for r in strong[:KPI_ROWS_PER_PILLAR // 2] + gaps[:KPI_ROWS_PER_PILLAR // 2]:
-            kpi_rows.append({**r, "pillar": name})
+            # "Key evidence / factor": what the scoring call said about this KPI, which is
+            # the column's whole point. A KPI the report never addressed has no evidence to
+            # show, so it says so rather than leaving the cell blank.
+            reason = str((r.get("evidence") or {}).get("reason") or "").strip()
+            driver = reason or ("Not addressed in the report" if r["score"] == 0
+                                else _pages(r["pages"]))
+            kpi_rows.append({**r, "pillar": name, "driver": driver})
         total += len(rows)
         found += len(strong)
         specific += sum(1 for r in strong if r["score"] >= 81)
 
     completeness = found / total * 100 if total else 0.0
     specificity = specific / found * 100 if found else 0.0
+    # Verification is counted, not judged: how many of the KPIs that scored were scored on
+    # assured or independently verified evidence. Reports scored before evidence_type
+    # existed carry none, and the row says that rather than reading as a failure.
+    scored_rows = [r for code, _ in PILLARS for r in pillars[code]["rows"] if r["score"] > 0]
+    typed = [r for r in scored_rows if r["evidence_type"]]
+    assured = [r for r in typed if methodology.evidence_weight(r["evidence_type"]) >= 1.6]
+    if not typed:
+        verification = {"result": "Not assessed",
+                        "note": "This rating did not record the kind of evidence behind each KPI."}
+    else:
+        verification = {"result": _band(len(assured) / len(typed) * 100 if typed else 0, 30, 10),
+                        "note": f"{len(assured)} of {len(typed)} scored KPIs rest on assured or "
+                                "independently verified evidence"}
+    timeliness = {"result": "High" if period and period != "\u2014" else "Not assessed",
+                  "note": f"The report covers {period}; the rating was made on {_date(assessed)}."
+                          if period and period != "\u2014"
+                          else "The reporting period was not recorded with this submission."}
     grade, label = _grade(overall)
     return {
         "kind": kind, "company": company, "identifier": identifier, "sector": sector, "period": period,
@@ -231,8 +261,25 @@ def build_facts(kind: str, doc: dict) -> dict:
                          "result": _band(completeness, 60, 30)},
         "specificity": {"pct": specificity, "specific": specific, "found": found,
                         "result": _band(specificity, 50, 20)},
+        "verification": verification, "timeliness": timeliness,
+        # The five forward-looking dimensions (methodology 8.2.2). Nothing produces them
+        # yet -- they are an analyst judgement -- so the section says so rather than
+        # inventing an adjustment.
+        "transition": {},
         "reasons": reasons, "extra": extra, "subtitle_extra": subtitle_extra,
     }
+
+
+def _importance(row: dict) -> str:
+    """The KPI table's Weight / Importance cell: how material the indicator is for this
+    sector (methodology 7.2 with Annexure A), and the kind of evidence it was scored on
+    (8.3). Blank on a report scored before the weighting existed."""
+    parts = []
+    if row.get("materiality"):
+        parts.append(row["materiality"].title())
+    if row.get("evidence_type"):
+        parts.append(row["evidence_type"])
+    return " \u00b7 ".join(parts) or "\u2014"
 
 
 def _band(pct: float, high: float, moderate: float) -> str:
@@ -537,8 +584,17 @@ def _replace_all(document, values: dict) -> None:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     fix(p)
-    for p in document.sections[0].footer.paragraphs:
-        fix(p)
+    # The client's template carries the company line in the header and the classification
+    # in the footer, so both are substituted as well as the body.
+    for section in document.sections:
+        for part in (section.header, section.footer):
+            for p in part.paragraphs:
+                fix(p)
+            for t in part.tables:
+                for row in t.rows:
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            fix(p)
 
 
 def _fill_rows(table: Table, rows: list[list[str]]) -> None:
@@ -614,110 +670,142 @@ def _driver_lines(items, n: int = 5) -> list[str]:
             else (d["headline"] or d["detail"]) for d in drivers(items, n)]
 
 
+# The five forward-looking areas of the methodology 8.2.2, with what each one weighs.
+# They are listed whether or not they were assessed: the template has a row for each, and
+# a rating that silently drops the section reads as though transition was not considered.
+TRANSITION_AREAS = (
+    ("Target credibility", "Whether ESG and climate targets are specific, time-bound and backed by a baseline"),
+    ("Target progress", "Progress disclosed against stated targets and commitments"),
+    ("Transition readiness", "Preparedness for sector transition risk; technology, product or process change"),
+    ("Resilience", "Climate resilience and business continuity"),
+    ("Emerging risk preparedness", "Ability to respond to material emerging ESG risks"),
+)
+
+NOT_ASSESSED = "Not assessed"
+_NO_TRANSITION = ("No forward-looking assessment was recorded for this rating, so no adjustment "
+                  "was applied to the base score.")
+
+
+def _transition_rows(facts: dict) -> list[list[str]]:
+    """Section 5's forward-looking table (methodology 8.2.2).
+
+    The adjustment needs the five dimension scores, and nothing in the pipeline produces
+    them yet: they are an analyst judgement. So the areas are listed with what each weighs
+    and said plainly to be unassessed, rather than filled with a number nobody decided."""
+    scores = facts.get("transition") or {}
+    rows = []
+    for area, considered in TRANSITION_AREAS:
+        key = area.lower().replace(" ", "_").replace("/", "_")
+        value = scores.get(key)
+        rows.append([area,
+                     _fmt(value) if isinstance(value, (int, float)) else NOT_ASSESSED,
+                     considered,
+                     "" if isinstance(value, (int, float)) else _NO_TRANSITION])
+    return rows
+
+
+def _controversy(facts: dict) -> tuple[str, list[list[str]]]:
+    """Section 5's controversy table (methodology 8.2.3).
+
+    The methodology sources controversies from regulators, courts and news (evidence tier
+    C1); this rating reads only the company's own disclosure, so the only adverse events
+    it can see are the ones the report itself admits -- a KPI the scoring engine marked as
+    poor performance. Those are shown, and the limit is stated rather than implied."""
+    adverse = sorted((r for code in "ESG" for r in facts["pillars"][code]["rows"]
+                      if 0 < r["score"] <= scoring.POOR_TO),
+                     key=lambda r: r["score"])[:4]
+    if not adverse:
+        return ("No adverse event was identified in the source report. Controversies are "
+                "assessed from the company's own disclosure only; regulator, court and "
+                "media sources are not part of this rating, so a clean result here is not "
+                "a statement that none exist.", [])
+    status = (f"{len(adverse)} adverse finding{'s' if len(adverse) != 1 else ''} identified in the "
+              "source report. Identified from the company's own disclosure only; regulator, "
+              "court and media sources are not part of this rating.")
+    rows = []
+    for r in adverse:
+        reason = str((r.get("evidence") or {}).get("reason") or "").strip()
+        rows.append([r["kpi"], "Disclosed in the source report", "No adjustment applied",
+                     NOT_ASSESSED, reason or "See the KPI evidence for this indicator"])
+    return status, rows
+
+
+def _quality_rows(facts: dict) -> list[list[str]]:
+    """The five data-quality dimensions the methodology reports on.
+
+    Completeness and specificity are measured. Verification is counted from the kind of
+    evidence each KPI was scored on. Consistency needs a second source and timeliness needs
+    the reporting date against the rating period; where the rating cannot establish one, it
+    says so instead of grading it."""
+    c, s_, v = facts["completeness"], facts["specificity"], facts["verification"]
+    return [
+        ["Completeness", "Coverage of material indicators and reporting boundary",
+         f"{c['result']} ({c['pct']:.0f}%)", f"{c['found']} of {c['total']} KPIs found in the report"],
+        ["Specificity", "Whether disclosures are quantified, time-bound and location / business-unit specific",
+         f"{s_['result']} ({s_['pct']:.0f}%)", f"{s_['specific']} of {s_['found']} KPIs found are scored 81\u2013100"],
+        ["Consistency", "Alignment across annual report, SLFRS disclosures, website, regulator filings and questionnaire",
+         NOT_ASSESSED,
+         "This rating reads one disclosure, so there is no second source to compare it against."],
+        ["Verification", "Use of assurance, audit, certifications or independent evidence",
+         v["result"], v["note"]],
+        ["Timeliness", "Recency relative to the rating period and event monitoring",
+         facts["timeliness"]["result"], facts["timeliness"]["note"]],
+    ]
+
+
 def render(facts: dict, text: dict) -> bytes:
     d = docx.Document(str(TEMPLATE))
-    body = list(d.element.body.iterchildren())
-    paras = {id(el): Paragraph(el, d) for el in body if el.tag.endswith("}p")}
-    tables = [Table(el, d) for el in body if el.tag.endswith("}tbl")]
+    tables = d.tables
+    (snapshot, _tiles, _exec_box, _scorecard, e_themes, s_themes, g_themes, kpi_table, strengths_box,
+     priorities_table, _rationale_box, _method_box, quality_table, transition_table,
+     _controversy_status_box, controversy_table, _scale_table, _scope_box) = tables
 
-    def para_el(startswith: str):
-        return next(el for el in body if id(el) in paras and paras[id(el)].text.startswith(startswith))
-
-    # Removed: Transition & Controversy (from the blank line and header line before its
-    # title), the developer appendix (from its page break; the section properties stay),
-    # and the template's notes to developers.
-    start = body.index(para_el("5. Forward-Looking")) - 2
-    end = body.index(para_el("Rule: omit the controversy"))
-    _remove(body[start:end + 1])
-    _remove(body[body.index(para_el("Appendix A.")) - 2: len(body) - 1])
-    _remove([para_el("Automation rule:"), para_el("Optional output:")])
-    _set_paragraph(paras[id(para_el("6. Rating Interpretation"))], "5. Rating Interpretation & Methodology Notes")
-
-    # Indian terms and wording that matches the KPI method.
-    snapshot, tiles, exec_box, scorecard, e_themes, s_themes, g_themes, how_to_read, kpi_table, \
-        strengths_box, priorities_table, rationale_box, method_box, quality_table, overall_quality, \
-        scale_table, scope_box = [t for t in tables if t._tbl.getparent() is not None]
     _set_paragraph(snapshot.rows[1].cells[0].paragraphs[0], "CIN / GSTIN")
-    _set_paragraph(paras[id(para_el("Applicable KPIs are selected"))],
-                   "The strongest scores and the largest gaps in each pillar")
-    _set_paragraph(how_to_read.rows[0].cells[0].paragraphs[1],
-                   "Each page is placed in a pillar first, then each KPI it addresses is scored 0–100 on how "
-                   "good the performance is: 0 when it is only mentioned, promised or too vague to judge, "
-                   "1–20 poor (penalties, incidents, a worsening trend), 21–40 weak, 41–60 real action without "
-                   "results, 61–80 measured results, 81–100 targets met or independently assured. A KPI keeps "
-                   "its best score from any page, held down to 20 if any page showed poor performance; KPIs "
-                   "not found in the report score 0.")
-    _set_paragraph(paras[id(para_el("Evidence quality is reported"))],
-                   "How much of the KPI library the report covers, and how specific its evidence is")
-    _set_paragraph(method_box.rows[0].cells[0].paragraphs[1],
-                   "Scores are based on the evidence in the report. Completeness shows how many KPIs the report "
-                   "addresses; specificity shows how many of those are backed by measured data or targets with "
-                   "progress. Both explain the score; neither is scored separately.")
-    if facts["subtitle_extra"]:
-        sub = paras[id(para_el("Automated companion report"))]
-        _set_paragraph(sub, sub.text.replace(" | {{VERSION_DATE}}", facts["subtitle_extra"] + " | {{VERSION_DATE}}"))
 
-    # Dynamic tables.
+    # Dynamic tables. Each keeps the template's header row and replaces the rows below it.
     for code, theme_table in (("E", e_themes), ("S", s_themes), ("G", g_themes)):
         themes = facts["pillars"][code]["themes"]
         _fill_rows(theme_table, [[t["name"], _fmt(t["score"]), t["label"], t["drivers"], t["note"]] for t in themes]
-                   or [["Themes not available", "—", "—", "KPIs are not mapped to sub-pillars for this report", "—"]])
-    _drop_column(kpi_table, 4, give_width_to=5)
-    _fill_rows(kpi_table, [[r["pillar"], r["theme"] or "—", r["kpi"], _fmt(r["score"]), _pages(r["pages"]),
-                            _status(r["score"]), _level_text(r["score"])] for r in facts["kpi_rows"]])
+                   or [["Themes not available", "\u2014", "\u2014",
+                        "KPIs are not mapped to sub-pillars for this report", "\u2014"]])
+    _fill_rows(kpi_table, [[r["pillar"], r["theme"] or "\u2014", r["kpi"], _fmt(r["score"]),
+                            _importance(r), r["driver"], _status(r["score"]), _level_text(r["score"])]
+                           for r in facts["kpi_rows"]])
     _numbered(strengths_box.rows[0].cells[0], _driver_lines(text.get("strengths")))
     _numbered(strengths_box.rows[0].cells[1], _driver_lines(text.get("weaknesses")))
     priorities = [p for p in text.get("priorities") or [] if isinstance(p, dict)][:5]
     _fill_rows(priorities_table, [[str(i), p.get("area", ""), p.get("gap", ""), p.get("why", ""), p.get("action", "")]
-                                  for i, p in enumerate(priorities, 1)])
-    for row in list(quality_table.rows)[3:]:
-        quality_table._tbl.remove(row._tr)  # consistency, verification, timeliness
-    _set_paragraph(quality_table.rows[1].cells[1].paragraphs[0], "Share of the KPI library the report addresses")
-    _set_paragraph(quality_table.rows[2].cells[1].paragraphs[0],
-                   "Share of the KPIs found that are backed by measured data or targets with progress")
-    _set_paragraph(overall_quality.rows[1].cells[0].paragraphs[0], "Overall data completeness")
+                                  for i, p in enumerate(priorities, 1)]
+               or [["1", "\u2014", "No priority was recorded for this rating", "\u2014", "\u2014"]])
+    _fill_rows(quality_table, _quality_rows(facts))
+    _fill_rows(transition_table, _transition_rows(facts))
+    controversy_status, controversy_rows = _controversy(facts)
+    _fill_rows(controversy_table, controversy_rows
+               or [["No adverse event identified", "\u2014", "No adjustment applied", "\u2014", "\u2014"]])
 
     p, c, s = facts["pillars"], facts["completeness"], facts["specificity"]
-    top_strengths = [f"{r['kpi']} ({_fmt(r['score'])})" for code in "ESG" for r in p[code]["strong"][:1]]
-    # Weakest sub-pillars; reports scored before the metrics sheet have none, so their
-    # biggest undisclosed KPIs stand in.
-    weak_areas = [f"{t['name']} ({_fmt(t['score'])})" for t in
-                  sorted((t for code in "ESG" for t in p[code]["themes"]), key=lambda t: t["score"])[:3]] \
-        or [r["kpi"] for code in "ESG" for r in p[code]["gaps"]][:3]
-    implication = {
-        "High": "The report covers most of the KPI library, so the scores rest on broad evidence.",
-        "Moderate": "The report covers part of the KPI library; missing KPIs hold the scores down.",
-        "Low": "The report covers a small part of the KPI library; most KPIs score 0 for lack of evidence.",
-    }[c["result"]]
     values = {
-        "VERSION_DATE": "Generated " + datetime.now(timezone.utc).strftime("%d %b %Y"),
+        "VERSION_DATE": "Generated " + datetime.now(timezone.utc).strftime("%d %b %Y")
+                        + (facts["subtitle_extra"] or ""),
         "COMPANY_NAME": facts["company"], "SECTOR": facts["sector"], "CSE_IDENTIFIER": facts["identifier"],
         "REPORTING_PERIOD": facts["period"], "ASSESSMENT_DATE": facts["assessed"], "RATING_STATUS": facts["status"],
         "OVERALL_SCORE": _fmt(facts["overall"]), "RATING_GRADE": facts["grade"], "RATING_DEFINITION": facts["label"],
         "SCORE_MOVEMENT": facts["movement"], "OVERALL_DATA_COMPLETENESS": f"{c['result']} ({c['pct']:.0f}%)",
         "EXECUTIVE_RATING_SUMMARY": text.get("executive_summary", ""),
-        "DISCLOSURE_HEADLINE": str(text.get("disclosure_headline", "")).rstrip("."),
-        "KEY_RATING_DRIVERS": str(text.get("key_rating_drivers", "")).rstrip("."),
         "RATING_RATIONALE": text.get("rating_rationale", ""),
-        "RATING_INTERPRETATION": f"{text.get('rating_interpretation', '')} Overall score weights: {facts['weights']}.",
-        "DATA_COMPLETENESS_RESULT": f"{c['result']} ({c['pct']:.0f}%)",
-        "DATA_COMPLETENESS_NOTE": f"{c['found']} of {c['total']} KPIs found in the report",
-        "DATA_SPECIFICITY_RESULT": f"{s['result']} ({s['pct']:.0f}%)",
-        "DATA_SPECIFICITY_NOTE": f"{s['specific']} of {s['found']} KPIs found are scored 81–100",
-        "DATA_COMPLETENESS_IMPLICATION": implication,
+        "RATING_INTERPRETATION": f"{text.get('rating_interpretation', '')} "
+                                 f"Overall score weights: {facts['weights']}.".strip(),
+        "CONTROVERSY_STATUS": controversy_status,
     }
-    for i in range(3):
-        values[f"TOP_STRENGTH_{i + 1}"] = top_strengths[i] if i < len(top_strengths) else "—"
-        values[f"TOP_WEAKNESS_{i + 1}"] = weak_areas[i] if i < len(weak_areas) else "—"
     for code in "ESG":
         values[f"{code}_SCORE"] = _fmt(p[code]["score"])
         values[f"{code}_GRADE"] = p[code]["grade"]
         values[f"{code}_LABEL"] = p[code]["label"]
         values[f"{code}_PILLAR_NARRATIVE"] = (text.get("pillar_narratives") or {}).get(code, "")
-        values[f"{code}_STRONG_DRIVERS"] = "; ".join(f"{r['kpi']} ({_fmt(r['score'])})" for r in p[code]["strong"][:3]) or "No KPI evidence found"
+        values[f"{code}_STRONG_DRIVERS"] = "; ".join(
+            f"{r['kpi']} ({_fmt(r['score'])})" for r in p[code]["strong"][:3]) or "No KPI evidence found"
         values[f"{code}_GAPS"] = "; ".join(r["kpi"] for r in p[code]["gaps"][:3]) or "No KPI gaps"
     _replace_all(d, values)
-    # Scorecard: a pillar set by an analyst says so, with the KPI total beside it.
 
     out = io.BytesIO()
     d.save(out)

@@ -97,27 +97,58 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     text = _text_of(resp.content)
 
     assert "{{" not in text
-    for gone in ("Forward-Looking", "Controversy", "Appendix", "Consistency", "Verification", "Timeliness",
-                 "Weight / Importance", "SLFRS", "CSE / Identifier", "Automation rule"):
+    # The client's template is reproduced whole: every section it has is present and
+    # filled, rather than the sections without data being cut out (user, 2026-09-25).
+    for section in ("1. Pillar Assessment", "2. KPI & Evidence Summary",
+                    "3. Strengths, Weaknesses & Improvement Priorities",
+                    "4. Data Completeness & Evidence Confidence",
+                    "5. Forward-Looking / Transition & Controversy",
+                    "6. Rating Interpretation & Methodology Notes"):
+        assert section in text, section
+    for heading in ("Weight / Importance", "Consistency", "Verification", "Timeliness",
+                    "Key evidence / factor"):
+        assert heading in text, heading
+    # The developer notes and appendix are not in the client's template at all.
+    for gone in ("Appendix", "Automation rule", "Optional output"):
         assert gone not in text, gone
-    assert "CFC FINLEASE PRIVATE LIMITED" in text and "CIN / GSTIN | Not provided" in text
-    assert "5. Rating Interpretation & Methodology Notes" in text
+    assert "CIN / GSTIN | Not provided" in text
+    # The client's template carries the company line in the page header.
+    head = docx.Document(io.BytesIO(resp.content)).sections[0].header
+    assert "CFC FINLEASE PRIVATE LIMITED" in "\n".join(p.text for p in head.paragraphs)
     # Scores exactly as stored: E = (40 + 90 + 0) / 300 -> 43.33
     assert "ENVIRONMENT\n43.33\nC · Average" in text
     # Theme = average of its KPIs: Water (40 + 90) / 2 = 65; Waste 0
     assert "Water | 65 | Good | Water withdrawn (90); Water related targets (40) | 2 of 2 KPIs found in the report" in text
     assert "Waste | 0 | Below Average | No KPI evidence found | 0 of 1 KPIs found in the report" in text
-    # KPI table: 7 columns, strongest and gaps with their theme and pages
-    assert ("Environment | Water | Water withdrawn | 90 | Found on p. 3 | Strong | "
+    # KPI table: the client's 8 columns -- pillar, theme, KPI, score, weight/importance,
+    # key evidence, status, data note. Importance is "\u2014" here because this report was
+    # scored without the library's materiality (app/reports/summary.py _importance).
+    assert ("Environment | Water | Water withdrawn | 90 | \u2014 | Found on p. 3 | Strong | "
             "Strong: targets met, measured improvement or assurance") in text
-    assert "Environment | Waste | Waste management policy | 0 | Not found in the report | Not found | Not found in the report" in text
-    # Completeness: 4 of 7 KPIs found; specificity: 2 of 4 scored 81-100
-    assert "Completeness | Share of the KPI library the report addresses | Moderate (57%) | 4 of 7 KPIs found in the report" in text
-    assert "Specificity" in text and "2 of 4 KPIs found are scored 81–100" in text
+    assert ("Environment | Waste | Waste management policy | 0 | \u2014 | Not addressed in the report | "
+            "Not found | Not found in the report") in text
+    # The five data-quality dimensions, with the template's own wording in the middle
+    # column. Completeness: 4 of 7 KPIs found; specificity: 2 of 4 scored 81-100.
+    assert ("Completeness | Coverage of material indicators and reporting boundary | "
+            "Moderate (57%) | 4 of 7 KPIs found in the report") in text
+    assert "Specificity" in text and "2 of 4 KPIs found are scored 81\u2013100" in text
+    # What the rating cannot establish says so, rather than being graded or cut out.
+    assert "Consistency" in text and "no second source to compare it against" in text
+    assert "Verification" in text and "did not record the kind of evidence" in text
+    assert "Timeliness" in text and "The report covers 2025-2026" in text
     # AI prose is placed; missing list items are dropped, not left blank
     assert TEXT["executive_summary"] in text and "1. Water withdrawn (90)" in text and "3. " not in text.split("What is supporting")[1].split("|")[0]
     assert "1 | Environment - Waste | No waste policy | Waste is 0 | Publish the waste policy" in text
     assert "35% Environment + 30% Social + 35% Governance" in text
+
+    # Section 5 is filled, not cut. The forward-looking areas are the methodology's five,
+    # each said to be unassessed rather than given a number nobody decided; the
+    # controversy status states the limit of what this rating can see.
+    for area in ("Target credibility", "Target progress", "Transition readiness",
+                 "Resilience", "Emerging risk preparedness"):
+        assert area in text, area
+    assert "No forward-looking assessment was recorded" in text
+    assert "regulator, court and media sources are not part of this rating" in text
 
     # The AI text is cached until the scores change. Writing it takes one call per pass
     # (app/reports/summary.py PASSES): the summary and pillar assessments, the strengths,
