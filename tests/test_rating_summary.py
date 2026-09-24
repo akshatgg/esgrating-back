@@ -275,3 +275,27 @@ def test_the_word_summary_cannot_clip_or_slice_its_content(admin_client, db, fak
     assert capped == 0, f"{capped} rows keep a height that can clip their text"
     # Each table repeats its header when it does run over a page.
     assert all(t.rows[0]._tr.trPr.findall(qn("w:tblHeader")) for t in d.tables if t.rows)
+
+
+def test_the_word_summary_carries_the_analysts_corrections(admin_client, db, fake_ai):
+    """The Rating Summary page and the Word file are the same document: a correction made
+    on screen has to come out of the download, or the two say different things about the
+    same rating (user, 2026-09-25)."""
+    sid = _esg(db)
+    admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits", json={
+        "headings": {"sum_s3": "3. What Helps and What Hurts"},
+        "fields": {
+            "executive_summary": "The analyst's own opening.",
+            "rating_interpretation": "Read this grade as the analyst explains.",
+            "summary_text": {"CONTROVERSY_STATUS": "One matter is under review."},
+        },
+    })
+    text = _text_of(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content)
+
+    assert "3. What Helps and What Hurts" in text          # heading reworded
+    assert "3. Strengths, Weaknesses & Improvement Priorities" not in text
+    assert "The analyst's own opening." in text            # narrative field
+    assert "Read this grade as the analyst explains." in text
+    assert "One matter is under review." in text           # any slot, by key
+    # Untouched headings keep the client's wording exactly.
+    assert "1. Pillar Assessment" in text and "6. Rating Interpretation & Methodology Notes" in text

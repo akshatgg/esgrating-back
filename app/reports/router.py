@@ -146,7 +146,19 @@ def _report(kind: str, doc: dict) -> dict:
         # offer regeneration rather than silently showing nothing.
         "narrative": summary.with_edits(written, doc) if written else None,
         "narrative_stale": written is None and bool((doc.get("summary_ai") or {}).get("text")),
+        # The Rating Summary report: the same facts the Word file is built from, so the
+        # page shows exactly what will be downloaded and an analyst edits it there rather
+        # than opening the .docx (user, 2026-09-25). None when the report has no KPI
+        # coverage, which is the one case the summary cannot be built from.
+        "summary": _summary_facts(kind, doc),
     })
+
+
+def _summary_facts(kind: str, doc: dict):
+    try:
+        return serialize_doc(summary.build_facts(kind, doc))
+    except HTTPException:
+        return None
 
 
 @router.get("/{kind}/submissions/{id}/report")

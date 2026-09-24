@@ -49,6 +49,19 @@ _BFSI_ONEPAGER_HEADINGS = [
     "onepager_rating_summary" if k == "rating_summary" else k for k in _SHEET_HEADINGS
 ]
 
+# The Rating Summary report -- the client's Word template, shown on screen so an analyst
+# can correct it before it is issued (user, 2026-09-25). Every heading in the template is
+# here, so any of them can be reworded; the prose and the table text are FIELD_SPECS below.
+_SUMMARY_HEADINGS = [
+    "sum_title", "sum_subtitle", "sum_snapshot", "sum_exec_heading",
+    "sum_s1", "sum_s1_note", "sum_scorecard", "sum_e_factors", "sum_s_factors", "sum_g_factors",
+    "sum_themes_heading",
+    "sum_s2", "sum_s2_note", "sum_kpi_heading",
+    "sum_s3", "sum_priorities_heading", "sum_rationale_heading",
+    "sum_s4", "sum_s5", "sum_controversy_heading",
+    "sum_s6", "sum_read_heading", "sum_scale_heading", "sum_method_heading", "sum_note_heading",
+]
+
 
 def _unique(items):
     return list(dict.fromkeys(items))
@@ -61,8 +74,9 @@ HEADING_KEYS = {
     "esg": _unique(_SHEET_HEADINGS + [
         "report_title", "scoring_rationale", "score_scale",
         "marks_by_pillar", "key_rating_drivers", "strengths_heading", "weaknesses_heading",
-    ]),
+    ] + _SUMMARY_HEADINGS),
 }
+HEADING_KEYS["bfsi"] = _unique(HEADING_KEYS["bfsi"] + _SUMMARY_HEADINGS)
 
 _SHORT, _LONG, _LIST, _CATLISTS, _REASONS = "short", "long", "list", "catlists", "reasons"
 # A fixed set of values, the first one the default. A choice is how the sheet is told
@@ -79,6 +93,14 @@ _WEIGHTS = "weights"
 # The Reason a KPI carries in the KPI Assessment, per pillar and KPI name, so an analyst
 # can correct what the scoring call wrote (user, 2026-09-23).
 _KPITEXT = "kpitext"
+# Every other piece of text in the Rating Summary, by its own key: a table cell, a static
+# paragraph, a column heading. The summary is the client's Word template shown on screen,
+# and an analyst has to be able to correct any of it before it is issued (user,
+# 2026-09-25). Enumerating its 270 slots as separate fields would mean editing this file
+# every time the template changes, so it is one map of key -> text and the report decides
+# what the keys are. A key with blank text is dropped, which is how an override is undone.
+_TEXTMAP = "textmap"
+TEXTMAP_KEY_MAX = 80
 CHOICES = {"header_slot": ("text", "logo", "none")}
 
 FIELD_SPECS = {
@@ -99,6 +121,9 @@ FIELD_SPECS = {
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _LIST, "weaknesses": _LIST,
         "weights": _WEIGHTS,
+        # The Rating Summary report: its prose blocks, and every other slot by key.
+        "rating_interpretation": _LONG, "controversy_status": _LONG,
+        "summary_text": _TEXTMAP,
     },
     "bfsi": {
         "company": _SHORT, "sector": _SHORT, "industry": _SHORT, "fy": _SHORT, "report_date": _SHORT,
@@ -114,6 +139,8 @@ FIELD_SPECS = {
         # replaces it; clearing it goes back to the generated one (user, 2026-09-23).
         "rating_summary_text": _LONG, "kpi_assessment_note": _LONG,
         "kpi_reasons": _KPITEXT,
+        "rating_interpretation": _LONG, "controversy_status": _LONG,
+        "summary_text": _TEXTMAP,
         "executive_summary": _LONG, "favourable_factors": _LONG, "constraints": _LONG,
         "rating_rationale": _LONG, "pillar_narratives": _CATTEXT,
         "strengths": _LIST, "weaknesses": _LIST,
@@ -311,6 +338,17 @@ def normalize_edits(kind: str, payload, ctx: dict) -> dict:
                     cats[cat] = per_kpi
             if cats:
                 out["fields"][key] = cats
+        elif spec == _TEXTMAP:
+            texts = {}
+            for slot, text in _as_dict(value, f"Field {key!r}").items():
+                slot = str(slot).strip()
+                if not slot or len(slot) > TEXTMAP_KEY_MAX:
+                    raise UserError(f"{key}: {slot[:40]!r} is not a usable key.")
+                text = _text(text, f"{key}.{slot}", LONG_MAX, multiline=True)
+                if text != "":
+                    texts[slot] = text
+            if texts:
+                out["fields"][key] = texts
         elif spec == _REASONS:
             cats = {}
             for cat, texts in _as_dict(value, "Field 'reasons'").items():

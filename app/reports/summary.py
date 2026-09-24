@@ -755,6 +755,46 @@ def _quality_rows(facts: dict) -> list[list[str]]:
     ]
 
 
+# The template's own heading wording, by the key the Rating Summary page edits it under.
+# A heading an analyst has not touched keeps the client's words exactly.
+SUMMARY_HEADINGS = {
+    "sum_title": "CFC ESG Rating Summary",
+    "sum_snapshot": "COMPANY & RATING SNAPSHOT",
+    "sum_s1": "1. Pillar Assessment",
+    "sum_scorecard": "Pillar scorecard",
+    "sum_e_factors": "Environment \u2014 key assessment factors",
+    "sum_s_factors": "Social \u2014 key assessment factors",
+    "sum_g_factors": "Governance \u2014 key assessment factors",
+    "sum_s2": "2. KPI & Evidence Summary",
+    "sum_kpi_heading": "Applicable KPI summary",
+    "sum_s3": "3. Strengths, Weaknesses & Improvement Priorities",
+    "sum_priorities_heading": "Priority improvement opportunities",
+    "sum_rationale_heading": "Rating rationale",
+    "sum_s4": "4. Data Completeness & Evidence Confidence",
+    "sum_s5": "5. Forward-Looking / Transition & Controversy",
+    "sum_controversy_heading": "Controversy / adverse event assessment",
+    "sum_s6": "6. Rating Interpretation & Methodology Notes",
+    "sum_read_heading": "How the score should be read",
+    "sum_scale_heading": "CFC rating interpretation guide",
+    "sum_method_heading": "Methodology alignment statement",
+    "sum_note_heading": "Important note",
+}
+
+
+def _retitle(document, headings: dict) -> None:
+    """Reword the headings an analyst changed. Matched on the template's own text, so a
+    heading nobody touched is left exactly as the client wrote it."""
+    wanted = {SUMMARY_HEADINGS[k]: str(v).strip()
+              for k, v in (headings or {}).items()
+              if k in SUMMARY_HEADINGS and str(v or "").strip()}
+    if not wanted:
+        return
+    for p in document.paragraphs:
+        new = wanted.get(p.text.strip())
+        if new:
+            _set_paragraph(p, new)
+
+
 def _keep_whole(document) -> None:
     """Stop the Word summary clipping or slicing its content.
 
@@ -805,7 +845,10 @@ def _keep_with_next(document) -> None:
             p.paragraph_format.keep_with_next = True
 
 
-def render(facts: dict, text: dict) -> bytes:
+def render(facts: dict, text: dict, headings: dict | None = None, slots: dict | None = None) -> bytes:
+    """The Word summary. headings and slots are the analyst's corrections from the Rating
+    Summary page: a reworded heading, and any other slot of the template by key."""
+    headings, slots = headings or {}, slots or {}
     d = docx.Document(str(TEMPLATE))
     tables = d.tables
     (snapshot, _tiles, _exec_box, _scorecard, e_themes, s_themes, g_themes, kpi_table, strengths_box,
@@ -857,7 +900,10 @@ def render(facts: dict, text: dict) -> bytes:
         values[f"{code}_STRONG_DRIVERS"] = "; ".join(
             f"{r['kpi']} ({_fmt(r['score'])})" for r in p[code]["strong"][:3]) or "No KPI evidence found"
         values[f"{code}_GAPS"] = "; ".join(r["kpi"] for r in p[code]["gaps"][:3]) or "No KPI gaps"
+    # An analyst's own words win over anything generated above.
+    values.update({k: v for k, v in slots.items() if isinstance(v, str) and v.strip()})
     _replace_all(d, values)
+    _retitle(d, headings)
     _keep_whole(d)
     _keep_with_next(d)
 
@@ -893,7 +939,8 @@ def available(kind: str, doc: dict) -> bool:
 # The written rating an analyst can correct in the report (app/reports/editing.py
 # FIELD_SPECS). Their text wins over the AI's wherever they have written one.
 NARRATIVE_EDIT_KEYS = ("executive_summary", "favourable_factors", "constraints",
-                       "rating_rationale", "pillar_narratives", "strengths", "weaknesses")
+                       "rating_rationale", "pillar_narratives", "strengths", "weaknesses",
+                       "rating_interpretation", "controversy_status")
 
 
 def with_edits(text: dict, doc: dict) -> dict:
@@ -915,7 +962,13 @@ def with_edits(text: dict, doc: dict) -> dict:
 
 def build_summary(kind: str, doc: dict) -> bytes:
     facts = build_facts(kind, doc)
-    return render(facts, with_edits(narrative(kind, doc, facts), doc))
+    edits = (doc.get("report_edits") or {}).get("fields") or {}
+    # What the analyst changed on the Rating Summary page: its headings, and any slot of
+    # the template by key. The page and the Word file are the same document, so a
+    # correction made on screen has to come out of the download (user, 2026-09-25).
+    return render(facts, with_edits(narrative(kind, doc, facts), doc),
+                  headings=(doc.get("report_edits") or {}).get("headings") or {},
+                  slots=edits.get("summary_text") or {})
 
 
 def filename(kind: str, doc: dict) -> str:
