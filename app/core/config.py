@@ -16,8 +16,12 @@ class Settings(BaseSettings):
     # The "in." prefix is an inference profile, not decoration: gpt-5.6 reports
     # inferenceTypesSupported=["INFERENCE_PROFILE"], so the bare model id is rejected and
     # every call fails. "in." keeps inference in India; "global." would route anywhere.
-    esg_bedrock_model: str = "in.openai.gpt-5.6-luna"
-    bfsi_bedrock_model: str = "in.openai.gpt-5.6-luna"
+    # gpt-oss is served by AWS directly, so it needs no Marketplace subscription and works
+    # on a fresh account. gpt-5.6 and the Claude models need an accepted agreement and a
+    # valid payment instrument, so neither is safe as a default: selecting AWS would fail
+    # every call. An admin picks a different one on the dashboard.
+    esg_bedrock_model: str = "openai.gpt-oss-120b-1:0"
+    bfsi_bedrock_model: str = "openai.gpt-oss-120b-1:0"
     # Where Bedrock runs. ap-south-1 keeps inference in India, which matters for a
     # SEBI-licensed rating: the report text never leaves the country.
     bedrock_region: str = "ap-south-1"

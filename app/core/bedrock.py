@@ -59,7 +59,7 @@ def usable_models(refresh: bool = False) -> list[dict]:
         logger.error("bedrock: cannot list models: %s", e)
         return []   # not cached: a transient failure must not hide the list for 5 minutes
 
-    out, seen = [], set()
+    out, seen, checked, refused = [], set(), 0, 0
     for m in summaries:
         mid = m.get("modelId", "")
         if mid in seen or any(s in mid.lower() for s in _SKIP):
@@ -69,9 +69,11 @@ def usable_models(refresh: bool = False) -> list[dict]:
         if not ({"ON_DEMAND", "INFERENCE_PROFILE"} & set(m.get("inferenceTypesSupported") or [])):
             continue
         seen.add(mid)
+        checked += 1
         try:
             a = bedrock.get_foundation_model_availability(modelId=mid)
         except Exception:
+            refused += 1
             continue
         if (a.get("agreementAvailability", {}).get("status") == "AVAILABLE"
                 and a.get("authorizationStatus") == "AUTHORIZED"
@@ -79,6 +81,14 @@ def usable_models(refresh: bool = False) -> list[dict]:
                 and a.get("regionAvailability") == "AVAILABLE"):
             out.append({"id": mid, "name": m.get("modelName") or mid,
                         "provider": m.get("providerName") or ""})
+    # Every availability check failing is a permissions problem, not an account with no
+    # models -- bedrock:GetFoundationModelAvailability is a separate grant from
+    # bedrock:InvokeModel, and missing it emptied the dashboard picker. Say so, and do not
+    # cache the empty answer for five minutes.
+    if checked and refused == checked:
+        logger.error("bedrock: every model availability check was refused (%d of %d); "
+                     "the caller likely lacks bedrock:GetFoundationModelAvailability", refused, checked)
+        return []
     out.sort(key=lambda r: (r["provider"].lower(), r["name"].lower()))
     _cache = (time.monotonic(), out)
     return out
