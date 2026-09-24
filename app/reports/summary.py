@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import docx
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import HTTPException
@@ -753,6 +755,56 @@ def _quality_rows(facts: dict) -> list[list[str]]:
     ]
 
 
+def _keep_whole(document) -> None:
+    """Stop the Word summary clipping or slicing its content.
+
+    Two separate faults, both visible in one page break (user, 2026-09-25):
+
+    A row in the template carries a fixed height with no height rule, which a reader is
+    free to treat as a cap -- so a cell whose text is taller than the row has the rest of
+    it cut off mid-sentence. Setting the rule to "atLeast" keeps the height as a minimum
+    and lets the row grow instead.
+
+    And nothing forbids a row breaking across a page, so a two-line box can be sliced in
+    half by the page boundary. cantSplit keeps each row whole; a row taller than a page
+    still breaks, which is the only case where breaking is better than losing the text.
+    """
+    for table in document.tables:
+        for row in table.rows:
+            height = row.height          # read before the element is removed
+            tr_pr = row._tr.get_or_add_trPr()
+            for tag in ("cantSplit", "trHeight"):
+                for el in tr_pr.findall(qn("w:" + tag)):
+                    tr_pr.remove(el)
+            tr_pr.append(OxmlElement("w:cantSplit"))
+            if height is not None:
+                h = OxmlElement("w:trHeight")
+                h.set(qn("w:val"), str(getattr(height, "twips", None) or int(height)))
+                h.set(qn("w:hRule"), "atLeast")
+                tr_pr.append(h)
+        # A header row repeats at the top of each page it continues onto, so a table that
+        # does span a break is still readable.
+        if table.rows:
+            head_pr = table.rows[0]._tr.get_or_add_trPr()
+            if not head_pr.findall(qn("w:tblHeader")):
+                head_pr.append(OxmlElement("w:tblHeader"))
+
+
+def _keep_with_next(document) -> None:
+    """A section heading stranded at the foot of a page, with its table overleaf, reads as
+    a missing section. Headings and the short line under them stay with what follows."""
+    paras = document.paragraphs
+    for i, p in enumerate(paras):
+        text = p.text.strip()
+        if not text:
+            continue
+        is_heading = (p.style.name or "").startswith("Heading") or re.match(r"^\d+\.\s", text)
+        # The one-line description that sits between a heading and its table.
+        leads_table = i + 1 < len(paras) and not paras[i + 1].text.strip()
+        if is_heading or leads_table:
+            p.paragraph_format.keep_with_next = True
+
+
 def render(facts: dict, text: dict) -> bytes:
     d = docx.Document(str(TEMPLATE))
     tables = d.tables
@@ -806,6 +858,8 @@ def render(facts: dict, text: dict) -> bytes:
             f"{r['kpi']} ({_fmt(r['score'])})" for r in p[code]["strong"][:3]) or "No KPI evidence found"
         values[f"{code}_GAPS"] = "; ".join(r["kpi"] for r in p[code]["gaps"][:3]) or "No KPI gaps"
     _replace_all(d, values)
+    _keep_whole(d)
+    _keep_with_next(d)
 
     out = io.BytesIO()
     d.save(out)

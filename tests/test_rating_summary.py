@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import docx
 import pytest
 from bson import ObjectId
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -247,3 +248,30 @@ def test_gaps_name_the_themes_the_report_covers_before_the_ones_it_does_not(db):
     facts = summary.build_facts("esg", db.esg_submissions.find_one({"_id": sid}))
     gaps = [g["kpi"] for g in facts["pillars"]["E"]["gaps"]]
     assert gaps == ["Water targets", "Waste policy", "Waste recycled"]
+
+
+def test_the_word_summary_cannot_clip_or_slice_its_content(admin_client, db, fake_ai):
+    """Two faults seen in one page break (user, 2026-09-25): a cell's text cut off
+    mid-sentence, and a box sliced in half by the page boundary.
+
+    A row height with no rule is free to be treated as a cap, so text taller than the row
+    is clipped; "atLeast" makes it a minimum. And a row that may break across a page can
+    lose half its content to the boundary; cantSplit keeps it whole."""
+    sid = _esg(db)
+    data = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content
+    d = docx.Document(io.BytesIO(data))
+
+    heights = capped = split = 0
+    for t in d.tables:
+        for r in t.rows:
+            pr = r._tr.trPr
+            assert pr is not None and pr.findall(qn("w:cantSplit")), "a row may still split across a page"
+            split += 1
+            for h in pr.findall(qn("w:trHeight")):
+                heights += 1
+                if h.get(qn("w:hRule")) != "atLeast":
+                    capped += 1
+    assert split > 0 and heights > 0
+    assert capped == 0, f"{capped} rows keep a height that can clip their text"
+    # Each table repeats its header when it does run over a page.
+    assert all(t.rows[0]._tr.trPr.findall(qn("w:tblHeader")) for t in d.tables if t.rows)
