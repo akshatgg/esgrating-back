@@ -439,3 +439,40 @@ def test_a_fresh_analysis_carries_the_reason_for_every_scored_kpi(db, monkeypatc
     plain = kpis["Environment B"]
     assert plain["score"] == 61 and plain["evidence"]["reason"] == "recycling at 31%"
     assert "also" not in plain["evidence"]
+
+
+# --- the official stock-exchange sector (app/esg/sector.py) -------------------------------
+
+def test_a_verified_exchange_sector_wins_over_the_scoring_answers(db, prompts, monkeypatch):
+    """The sector on the report is the one the exchange assigns, not whatever the scoring
+    answers happened to say. It is also the materiality key for the methodology's Annexure A
+    weighting, whose groups are the same GICS industry groups an exchange assigns."""
+    listing = {"company_name": "Acme PLC", "stock_exchange": "Colombo Stock Exchange",
+               "ticker": "ACME.N0000", "sector": "Capital Goods",
+               "source": "https://cse.lk/x", "verification_date": "2026-09-29"}
+    asked = []
+    monkeypatch.setattr(pipeline.sector_lookup, "lookup",
+                        lambda name: asked.append(name) or listing)
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: FakeLLM({"Environment": 90, "Social": 60, "Governance": 50}))
+    cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent(
+        [("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025", company_name="Acme PLC")
+
+    assert asked == ["Acme PLC"]
+    assert final["sector"] == "Capital Goods"          # not the fake's "Finance"
+    # Stored whole: the exchange and ticker go on the report, and the source and date are
+    # what make the sector checkable rather than asserted.
+    assert final["exchange_listing"] == listing
+
+
+def test_nothing_verified_leaves_the_report_exactly_as_it_was(db, prompts, monkeypatch):
+    """No key, Bedrock selected, or nothing found: the lookup returns None and the run is
+    untouched. A missing sector must never take a rating down with it."""
+    monkeypatch.setattr(pipeline.sector_lookup, "lookup", lambda name: None)
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: FakeLLM({"Environment": 90, "Social": 60, "Governance": 50}))
+    cid = store.insert_user("Asha", "asha@x.com", "Acme", "9876543210", ["r.pdf"])
+    final = pipeline.calculate_esg_score_concurrent(
+        [("r.pdf", make_pdf(["p1 text"]))], cid, "2024-2025", company_name="Acme PLC")
+
+    assert final["sector"] == "Finance"                # what the scoring answers reported
+    assert "exchange_listing" not in final

@@ -18,6 +18,7 @@ from collections import Counter
 from datetime import datetime
 
 from app.core.answers import parse_answer
+from app.esg import sector as sector_lookup
 from app.core.kpis import page_sort_key, parse_kpi_list
 from app.esg import scoring
 from app.esg.scoring import composite_score, evaluate_score  # noqa: F401 (used by app.reports.editing)
@@ -175,7 +176,8 @@ def _cached(hash_text):
     return None
 
 
-def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=True):
+def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=True,
+                                   company_name: str = ""):
     # Added: use_cache=False skips the esg_hashes lookup so the report is scored fresh;
     # the new result is still stored and cached, and supersedes the old entry.
     try:
@@ -306,10 +308,18 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
         # The same numbers, KPI by KPI, go into the report as its KPI Assessment.
         kpi_coverage = {}
         page_rows = {}  # page -> {category: {score, kpis}}: the report's Page Scores table
-        # The company's sector, for the methodology's materiality weighting (Annexure A).
-        # The same value the report shows; an unrecognised one simply leaves every
-        # indicator at the default materiality.
-        sector = (final_scores.get("Environment") or {}).get("sector", "") or ""
+        # The company's officially assigned stock-exchange sector, looked up on the web
+        # against the client's own prompt (app/esg/sector.py). This is the sector the report
+        # shows AND the materiality key for the methodology's Annexure A weighting, whose
+        # groups are the same GICS industry groups an exchange assigns.
+        #
+        # None is a normal answer -- no key, Bedrock selected, or nothing verifiable found.
+        # The sector is then left to whatever the scoring answers reported, and an analyst
+        # can set it on the report. Never guessed here: a wrong sector silently reweights
+        # every indicator in the rating.
+        listing = sector_lookup.lookup(company_name)
+        sector = ((listing or {}).get("sector")
+                  or (final_scores.get("Environment") or {}).get("sector", "") or "")
         for category in scores:
             kpis = prompt_kpis(scoring_prompt(category))
             if not kpis:
@@ -362,13 +372,20 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
                 final_scores['Governance']['score'],
             ),
             "scoring_method": scoring.METHOD,
-            "sector": final_scores['Environment']['sector'].capitalize(),
+            # The verified exchange sector when there is one; otherwise what the scoring
+            # answers reported, as before.
+            "sector": (listing or {}).get("sector") or final_scores['Environment']['sector'].capitalize(),
             "industry": final_scores['Environment']['industry'].capitalize(),
             "environmental_top_keywords": final_scores['Environment']['positive_keywords'],
             "social_top_keywords": final_scores['Social']['positive_keywords'],
             "governance_top_keywords": final_scores['Governance']['positive_keywords'],
             "report_date": datetime.now().strftime('%Y-%m-%d')
         }
+        # The client's six fields, stored whole for auditability: the report has to show the
+        # exchange and ticker beside the sector, and the source and date are what make the
+        # sector checkable rather than asserted.
+        if listing:
+            final_report_data["exchange_listing"] = listing
         if kpi_coverage:
             final_report_data["kpi_coverage"] = kpi_coverage
             final_report_data["page_scores"] = [

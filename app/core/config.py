@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     mongo_db: str = "esg_score_calculator"
     esg_openai_api_key: str = ""
     esg_openai_model: str = "gpt-4.1-mini"
+    # The model that looks the company's stock-exchange sector up (app/esg/sector.py). Its
+    # own setting because it has to be one the account may use the web_search tool with,
+    # which is a different question from which model scores the pages. Blank uses the
+    # scoring model above.
+    esg_sector_model: str = ""
     # The model each provider is asked for. Bedrock names the same models differently, so
     # they are separate settings: whichever provider an admin picks on the dashboard
     # (app/core/llm_settings.py), the right id is sent to the right endpoint.

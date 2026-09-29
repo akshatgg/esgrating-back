@@ -106,6 +106,10 @@ CHOICES = {"header_slot": ("text", "logo", "none")}
 FIELD_SPECS = {
     "esg": {
         "company": _SHORT, "sector": _SHORT, "industry": _SHORT, "fy": _SHORT, "report_date": _SHORT,
+        # The verified stock-exchange listing shown beside the sector (app/esg/sector.py).
+        # Editable because the lookup cannot always run -- Bedrock has no web search -- and
+        # because a listing that has since changed should be correctable without a re-run.
+        "stock_exchange": _SHORT, "ticker": _SHORT,
         "environmental_top_keywords": _LIST, "social_top_keywords": _LIST,
         "governance_top_keywords": _LIST,
         "reasons": _REASONS,

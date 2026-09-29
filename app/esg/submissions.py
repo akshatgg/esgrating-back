@@ -112,7 +112,10 @@ def run_esg_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
         raise RuntimeError("User insertion failed.")
 
     result = calculate_esg_score_concurrent(
-        [(sub["original_filename"], data)], company_id, sub["report_year"], use_cache=use_cache
+        [(sub["original_filename"], data)], company_id, sub["report_year"], use_cache=use_cache,
+        # For the stock-exchange sector lookup (app/esg/sector.py): the name the submitter
+        # gave is what the client's prompt searches on.
+        company_name=sub.get("company_name") or "",
     )
     if "error" in result or result.get("status") == "error":
         raise RuntimeError(result.get("message") or result.get("error"))
