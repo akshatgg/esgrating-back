@@ -26,7 +26,9 @@ def test_extract_pdf_and_docx():
     assert [p["page_no"] for p in pages] == [1, 2] and "alpha" in pages[0]["text"]
     d = docx.Document(); d.add_paragraph("one"); d.add_paragraph("two")
     buf = io.BytesIO(); d.save(buf)
-    assert process_files([("r.docx", buf.getvalue())]) == [{"page_no": 1, "text": "onetwo"}]
+    # printed_no is the number printed on the page (app/esg/extract.py); a DOCX has none.
+    assert process_files([("r.docx", buf.getvalue())]) == [
+        {"page_no": 1, "text": "onetwo", "printed_no": None}]
 
 
 def test_full_run_scores_composite_and_persists(db, prompts, monkeypatch):

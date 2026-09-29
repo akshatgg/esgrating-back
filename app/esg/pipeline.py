@@ -250,23 +250,27 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for category in scores:
                     logger.info(f"Analyzing {category}...")
-                    futures = [
-                        executor.submit(analyze_chunk, page.get("text", ""), category)
+                    # The page travels with its own future. It used to be recovered
+                    # afterwards by matching the answer's text back against the list and
+                    # taking the first page that matched -- so any two pages that extracted
+                    # to the same string (dividers, boilerplate, a page that extracts to
+                    # just its running header) were both credited to the earlier one, and
+                    # the citation pointed backwards (user, 2026-09-29).
+                    futures = {
+                        executor.submit(analyze_chunk, page.get("text", ""), category): page
                         for page in pages_with_text
-                    ]
+                    }
                     for future in concurrent.futures.as_completed(futures):
+                        page = futures[future]
                         try:
                             analysis, text = future.result()
                             if analysis:
-                                page_no = next(
-                                    (page.get("page_no") for page in processed_data if page.get("text", "").strip() == text.strip()),
-                                    None
-                                )
                                 esg_records.append({
                                     "analysis": analysis,
                                     "text": text,
                                     "filename": filename,
-                                    "page_no": page_no,
+                                    "page_no": page.get("page_no"),
+                                    "printed_no": page.get("printed_no"),
                                     "category": category,
                                 })
                                 scores[category].append(analysis)
@@ -370,6 +374,17 @@ def calculate_esg_score_concurrent(files, company_id, report_year, use_cache=Tru
             final_report_data["page_scores"] = [
                 {"page": p, **page_rows[p]} for p in sorted(page_rows, key=page_sort_key)
             ]
+            # Sheet -> the number printed on that page (app/esg/extract.py). Everything
+            # keyed on the page stays keyed on the sheet, which is unique and is what a PDF
+            # viewer jumps to; this is only how the page is NAMED to a reader. Keys are
+            # strings because Mongo documents cannot have integer keys. A page with no
+            # folio -- front matter, or a file whose numbering could not be read -- is
+            # absent, and is cited by sheet.
+            final_report_data["page_numbers"] = {
+                str(rec["page_no"]): rec["printed_no"]
+                for rec in esg_records
+                if rec.get("page_no") is not None and rec.get("printed_no") is not None
+            }
 
         # Breakage (spec): if every category failed to score anything, the LLM never worked
         # (revoked key, no quota, ...). The aggregation except-path sets sector/industry to

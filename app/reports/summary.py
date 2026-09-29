@@ -114,12 +114,54 @@ def _status(score: float) -> str:
     return {"strong": "Strong", "partial": "Partial"}.get(scoring.level(score), "Not found")
 
 
-def _pages(pages) -> str:
-    pages = [str(p) for p in pages or []]
-    if not pages:
+# --- Naming a page to the reader ---------------------------------------------------------
+#
+# A page is held internally by its SHEET number -- what the PDF counts from the cover. That
+# is not the number printed on the page: a report starts its own numbering after the front
+# matter, so the two run a constant apart, and every citation we wrote read that many pages
+# ahead of where the reader looked (user, 2026-09-29). The map from one to the other is
+# measured at extraction (app/esg/extract.py folio_offset) and stored with the analysis.
+#
+# So the reader is always given the number printed on the page. Where there is none -- front
+# matter, or a document whose folios do not survive text extraction -- the sheet is named as
+# a sheet rather than passed off as a page number.
+
+
+SHEET = "PDF sheet"
+
+
+def _printed(page, numbers: dict | None):
+    value = (numbers or {}).get(str(page))
+    return value if isinstance(value, int) else None
+
+
+def _page_label(page, numbers: dict | None) -> str:
+    """The bare number to show for one page."""
+    printed = _printed(page, numbers)
+    return str(printed) if printed is not None else f"{SHEET} {page}"
+
+
+def _cite(page, numbers: dict | None) -> str:
+    """One page as a citation: "p.32", or "PDF sheet 34" where the folio is unknown. Named
+    as a sheet rather than passed off as a page number, so a reader who cannot find page 34
+    knows which number they are holding."""
+    printed = _printed(page, numbers)
+    return f"p.{printed}" if printed is not None else f"{SHEET} {page}"
+
+
+def _pages(pages, numbers: dict | None = None) -> str:
+    """The "Source pages" cell. All printed or all sheets, never a mixture: two numbering
+    schemes in one list is how the reader was misled in the first place."""
+    items = list(pages or [])
+    if not items:
         return "Not found in the report"
-    shown = ", ".join(pages[:6]) + (f" +{len(pages) - 6} more" if len(pages) > 6 else "")
-    return f"Found on p. {shown}"
+    printed = [_printed(p, numbers) for p in items]
+    if all(n is not None for n in printed):
+        labels, lead = [str(n) for n in printed], "Found on p."
+    else:
+        labels, lead = [str(p) for p in items], f"Found on {SHEET}"
+    shown = ", ".join(labels[:6]) + (f" +{len(items) - 6} more" if len(items) > 6 else "")
+    return f"{lead} {shown}"
 
 
 def build_facts(kind: str, doc: dict) -> dict:
@@ -143,6 +185,9 @@ def build_facts(kind: str, doc: dict) -> dict:
         reasons = [{"category": c, "page": row.get("page"), "reason": (row.get(c) or {}).get("reason", "")}
                    for row in final.get("page_scores") or [] for c in ("Environment", "Social", "Governance")
                    if (row.get(c) or {}).get("reason")]
+        # Sheet -> printed page number, stored by the pipeline. Absent on reports scored
+        # before it existed, which are cited by sheet exactly as they were.
+        page_numbers = final.get("page_numbers") or {}
         extra = {}
         subtitle_extra = ""
     else:
@@ -166,6 +211,7 @@ def build_facts(kind: str, doc: dict) -> dict:
                     if prev and isinstance(prev.get("overall_score"), (int, float)) else "First assessment")
         reasons = [{"category": dict(PILLARS)[c], "page": r.get("page"), "reason": r.get("reason", "")}
                    for c, _ in PILLARS for r in (ai.get("reasons") or {}).get(c) or [] if isinstance(r, dict)]
+        page_numbers = ai.get("page_numbers") or {}
         extra = {k: ai.get(k) for k in ("top_risks", "top_improvements", "climate_risk", "governance_summary")}
         subtitle_extra = f" | BFSI borrower assessment ({doc.get('loan_type', '—')} loan)"
 
@@ -226,7 +272,7 @@ def build_facts(kind: str, doc: dict) -> dict:
             # show, so it says so rather than leaving the cell blank.
             reason = str((r.get("evidence") or {}).get("reason") or "").strip()
             driver = reason or ("Not addressed in the report" if r["score"] == 0
-                                else _pages(r["pages"]))
+                                else _pages(r["pages"], page_numbers))
             kpi_rows.append({**r, "pillar": name, "driver": driver})
         total += len(rows)
         found += len(strong)
@@ -268,6 +314,8 @@ def build_facts(kind: str, doc: dict) -> dict:
         # yet -- they are an analyst judgement -- so the section says so rather than
         # inventing an adjustment.
         "transition": {},
+        # Sheet -> printed page number, for every place a page is named to a reader.
+        "page_numbers": page_numbers,
         "reasons": reasons, "extra": extra, "subtitle_extra": subtitle_extra,
     }
 
@@ -424,7 +472,7 @@ ENGINE_VERSIONS = {
 }
 
 
-def _kpi_evidence(r: dict) -> str:
+def _kpi_evidence(r: dict, numbers: dict | None = None) -> str:
     """"Water withdrawn (90) -- p.12: 22% reduction against a 2030 target": the KPI, the
     score it earned and the reason the scoring call gave for it (app/esg/scoring.py
     kpi_reasons), so the summary text is written from the evidence, not from the number
@@ -434,7 +482,7 @@ def _kpi_evidence(r: dict) -> str:
         text += " [held down: a page showed poor performance]"
     ev = r.get("evidence") or {}
     if ev.get("reason"):
-        page = f"p.{ev['page']}" if ev.get("page") is not None else "the report"
+        page = _cite(ev["page"], numbers) if ev.get("page") is not None else "the report"
         return f"{text} -- {page}: {str(ev['reason'])[:200]}"
     return text
 
@@ -447,13 +495,14 @@ def _narrative_input(f: dict) -> dict:
         "pillars": {c: {"name": p["name"], "score": round(p["score"], 2), "grade": p["grade"],
                         **({"set_by_analyst": True, "kpi_total": round(p["kpi_total"], 2)} if p["manual"] else {}),
                         "themes": [{"name": t["name"], "score": t["score"], "found": t["note"]} for t in p["themes"]],
-                        "strongest_kpis": [_kpi_evidence(r) for r in p["strong"]],
+                        "strongest_kpis": [_kpi_evidence(r, f["page_numbers"]) for r in p["strong"]],
                         "kpis_not_disclosed": [f"{r['kpi']} ({r['theme']})" if r["theme"] else r["kpi"]
                                                for r in p["gaps"]]}
                     for c, p in f["pillars"].items()},
         "evidence": {"kpis_found": f["completeness"]["found"], "kpis_total": f["completeness"]["total"],
                      "found_with_measured_data": f["specificity"]["specific"]},
-        "page_reasons": [f"{r['category']} p.{r['page']}: {str(r['reason'])[:280]}" for r in f["reasons"][:30]],
+        "page_reasons": [f"{r['category']} {_cite(r['page'], f['page_numbers'])}: "
+                         f"{str(r['reason'])[:280]}" for r in f["reasons"][:30]],
         **({"analyst_notes": f["extra"]} if f["extra"] else {}),
     }
 
@@ -573,6 +622,82 @@ def _set_paragraph(p: Paragraph, text: str) -> None:
             r.text = ""
     else:
         p.add_run(text)
+
+
+# --- Page numbers in the footer ------------------------------------------------------------
+#
+# The classification line the client's template already centres in the footer; the page
+# number is appended to it so the footer stays one line.
+_FOOTER_ANCHOR = "Internal - Confidential"
+
+
+def _styled_run(paragraph, text: str, like):
+    """A run carrying `text` in the same character formatting as `like`, so the page number
+    matches the footer it is appended to rather than reverting to the document default."""
+    run = OxmlElement("w:r")
+    if like is not None:
+        props = like.find(qn("w:rPr"))
+        if props is not None:
+            run.append(copy.deepcopy(props))
+    node = OxmlElement("w:t")
+    node.set(qn("xml:space"), "preserve")
+    node.text = text
+    run.append(node)
+    paragraph._p.append(run)
+    return run
+
+
+def _field(paragraph, instruction: str, like) -> None:
+    """One Word field -- PAGE or NUMPAGES -- appended to `paragraph`.
+
+    w:dirty asks Word to evaluate it when the document opens, so the placeholder result
+    below is never what a reader sees."""
+    def run(child):
+        r = OxmlElement("w:r")
+        if like is not None:
+            props = like.find(qn("w:rPr"))
+            if props is not None:
+                r.append(copy.deepcopy(props))
+        r.append(child)
+        paragraph._p.append(r)
+
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" {instruction} "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    placeholder = OxmlElement("w:t")
+    placeholder.text = "1"
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for child in (begin, instr, separate, placeholder, end):
+        run(child)
+
+
+def _number_pages(document) -> None:
+    """"Internal - Confidential  ·  Page 4 of 11" in the footer of every section.
+
+    A PAGE field is evaluated by Word itself while it lays the document out, so the number
+    is whatever page the footer is being drawn on. That is the whole reason to use one:
+    nothing here counts pages, so nothing here can be off by two the way a number we worked
+    out in advance would be -- and it stays correct when a long strengths section
+    repaginates the file (user, 2026-09-29)."""
+    for section in document.sections:
+        footer = section.footer
+        paragraphs = list(footer.paragraphs)
+        target = next((p for p in paragraphs if _FOOTER_ANCHOR in p.text), None)
+        if target is None:
+            target = paragraphs[0] if paragraphs else footer.add_paragraph()
+        if target._p.findall(qn("w:fldChar")) or "Page " in target.text:
+            continue  # already numbered
+        like = target.runs[-1]._r if target.runs else None
+        _styled_run(target, "  \u00b7  Page ", like)
+        _field(target, "PAGE", like)
+        _styled_run(target, " of ", like)
+        _field(target, "NUMPAGES", like)
 
 
 def _replace_all(document, values: dict) -> None:
@@ -795,10 +920,18 @@ def _retitle(document, headings: dict) -> None:
             _set_paragraph(p, new)
 
 
-# Characters in a row beyond which it is allowed to break across a page. A page of this
-# template holds roughly 3,500 characters of table text; the limit is set below that so a
-# row near the boundary still flows rather than risking a clip.
+# Characters in a row's TALLEST CELL beyond which the row is allowed to break across a page.
+# A page of this template holds roughly 3,500 characters of table text; the limit is set
+# below that so a row near the boundary still flows rather than risking a clip.
+#
+# The tallest cell, not the sum: columns sit side by side, so a two-column row is as tall as
+# its longer side, and summing them made a row that fits a page comfortably look oversized.
 SPLITTABLE_FROM = 2000
+
+
+def _row_height(row) -> int:
+    """How tall a row is, in characters of its longest cell."""
+    return max((len(c.text) for c in row.cells), default=0)
 
 
 def _keep_whole(document) -> None:
@@ -827,7 +960,7 @@ def _keep_whole(document) -> None:
             # overflow is simply not drawn -- which lost the whole strengths and weaknesses
             # box once those became 1,000 words each (user, 2026-09-25). A long row is left
             # free to flow onto the next page, which is the only way to keep its text.
-            if sum(len(c.text) for c in row.cells) <= SPLITTABLE_FROM:
+            if _row_height(row) <= SPLITTABLE_FROM:
                 tr_pr.append(OxmlElement("w:cantSplit"))
             if height is not None:
                 h = OxmlElement("w:trHeight")
@@ -836,10 +969,69 @@ def _keep_whole(document) -> None:
                 tr_pr.append(h)
         # A header row repeats at the top of each page it continues onto, so a table that
         # does span a break is still readable.
-        if table.rows:
+        #
+        # Only where row 0 really is a header. Word does not split a header row, so marking
+        # the only row of a one-row table makes it unbreakable -- the same trap as cantSplit,
+        # and it is what clipped the strengths and weaknesses box (user, 2026-09-29). A row
+        # that is itself page-sized is content, not a heading.
+        if len(table.rows) > 1 and _row_height(table.rows[0]) <= SPLITTABLE_FROM:
             head_pr = table.rows[0]._tr.get_or_add_trPr()
             if not head_pr.findall(qn("w:tblHeader")):
                 head_pr.append(OxmlElement("w:tblHeader"))
+
+
+# A numbered item in the strengths / weaknesses box: "1. Waste management: ...".
+_ITEM = re.compile(r"^\d+\.\s")
+
+
+def _split_item_rows(document) -> None:
+    """Rebuild the strengths / weaknesses box as one row per item.
+
+    The template holds all five strengths and all five weaknesses in a SINGLE table row of
+    two cells. At the length the client asked for -- 1,000 words a side -- that row is
+    several pages tall, and a row taller than a page is at the mercy of the renderer: Word
+    splits it, Apple Pages and several PDF converters simply stop drawing at the page
+    boundary, which is how the whole box vanished (user, 2026-09-25, 2026-09-29).
+
+    Rather than keep asking renderers to split one enormous row, the row is made small: the
+    two headings stay in row 0 and each numbered item gets a row of its own. The layout the
+    client designed is unchanged -- still two columns, still side by side -- but now every
+    row fits on a page, so the break falls between items and nothing is ever clipped."""
+    for table in document.tables:
+        if len(table.rows) != 1 or len(table.columns) != 2:
+            continue
+        cells = table.rows[0].cells
+        if max((len(c.text) for c in cells), default=0) <= SPLITTABLE_FROM:
+            continue  # short enough to stay whole; leave the client's layout alone
+        items = [[i for i, p in enumerate(c.paragraphs) if _ITEM.match(p.text.strip())]
+                 for c in cells]
+        if max(len(x) for x in items) < 2:
+            continue  # not a list: nothing to split on
+
+        tr = table.rows[0]._tr
+        anchor = tr
+        for _ in range(max(len(x) for x in items)):
+            clone = copy.deepcopy(tr)
+            anchor.addnext(clone)
+            anchor = clone
+        for n, row in enumerate(table.rows[1:]):
+            for col, cell in enumerate(row.cells):
+                keep = items[col][n] if n < len(items[col]) else None
+                paragraphs = list(cell.paragraphs)
+                for i, para in enumerate(paragraphs):
+                    if i == keep:
+                        continue
+                    # Word requires a cell to hold at least one paragraph; the first one is
+                    # emptied rather than removed so a column that ran out of items leaves a
+                    # blank cell instead of an invalid one.
+                    if keep is None and i == 0:
+                        _set_paragraph(para, "")
+                        continue
+                    para._p.getparent().remove(para._p)
+        for cell in table.rows[0].cells:      # row 0 keeps only its heading
+            for para in list(cell.paragraphs):
+                if _ITEM.match(para.text.strip()):
+                    para._p.getparent().remove(para._p)
 
 
 def _keep_with_next(document) -> None:
@@ -916,8 +1108,11 @@ def render(facts: dict, text: dict, headings: dict | None = None, slots: dict | 
     values.update({k: v for k, v in slots.items() if isinstance(v, str) and v.strip()})
     _replace_all(d, values)
     _retitle(d, headings)
+    # Split before the row rules below are applied, so the new rows get them too.
+    _split_item_rows(d)
     _keep_whole(d)
     _keep_with_next(d)
+    _number_pages(d)
 
     out = io.BytesIO()
     d.save(out)

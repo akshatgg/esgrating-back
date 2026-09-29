@@ -1,5 +1,6 @@
 # The ESG Rating Summary (.docx) for ESG and BFSI reports (app/reports/summary.py).
 import io
+import zipfile
 import re
 from datetime import datetime, timezone
 
@@ -124,7 +125,9 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     # KPI table: the client's 8 columns -- pillar, theme, KPI, score, weight/importance,
     # key evidence, status, data note. Importance is "\u2014" here because this report was
     # scored without the library's materiality (app/reports/summary.py _importance).
-    assert ("Environment | Water | Water withdrawn | 90 | \u2014 | Found on p. 3 | Strong | "
+    # "PDF sheet 3", not "p. 3": this fixture stores no page_numbers, so the number printed
+    # on that page is unknown and the sheet is named as a sheet rather than passed off as one.
+    assert ("Environment | Water | Water withdrawn | 90 | \u2014 | Found on PDF sheet 3 | Strong | "
             "Strong: targets met, measured improvement or assurance") in text
     assert ("Environment | Waste | Waste management policy | 0 | \u2014 | Not addressed in the report | "
             "Not found | Not found in the report") in text
@@ -266,8 +269,9 @@ def test_the_word_summary_cannot_clip_or_slice_its_content(admin_client, db, fak
         for r in t.rows:
             pr = r._tr.trPr
             assert pr is not None
-            # A row short enough to fit a page is kept whole.
-            if sum(len(c.text) for c in r.cells) <= summary.SPLITTABLE_FROM:
+            # A row short enough to fit a page is kept whole. Height is the tallest cell:
+            # columns sit side by side, so a row is as tall as its longer side.
+            if summary._row_height(r) <= summary.SPLITTABLE_FROM:
                 assert pr.findall(qn("w:cantSplit")), "a short row may still be sliced"
                 kept += 1
             for h in pr.findall(qn("w:trHeight")):
@@ -276,8 +280,15 @@ def test_the_word_summary_cannot_clip_or_slice_its_content(admin_client, db, fak
                     capped += 1
     assert kept > 0 and heights > 0
     assert capped == 0, f"{capped} rows keep a height that can clip their text"
-    # Each table repeats its header when it does run over a page.
-    assert all(t.rows[0]._tr.trPr.findall(qn("w:tblHeader")) for t in d.tables if t.rows)
+    # A table with a real header row repeats it when it runs over a page. Only a real one:
+    # Word will not split a header row, so marking the single row of a one-row table makes
+    # it unbreakable and its overflow is never drawn (user, 2026-09-29).
+    for t in d.tables:
+        if not t.rows:
+            continue
+        marked = bool(t.rows[0]._tr.trPr.findall(qn("w:tblHeader")))
+        is_header = len(t.rows) > 1 and summary._row_height(t.rows[0]) <= summary.SPLITTABLE_FROM
+        assert marked == is_header, "a page-sized row must not be marked as a repeating header"
 
 
 def test_the_word_summary_carries_the_analysts_corrections(admin_client, db, fake_ai):
@@ -304,23 +315,72 @@ def test_the_word_summary_carries_the_analysts_corrections(admin_client, db, fak
     assert "1. Pillar Assessment" in text and "6. Rating Interpretation & Methodology Notes" in text
 
 
-def test_a_row_too_tall_for_a_page_is_left_free_to_flow(admin_client, db, monkeypatch):
-    """cantSplit on a row taller than the page is destructive: it may not break, cannot
-    fit, and the overflow is simply not drawn. That lost the whole strengths and weaknesses
-    box once those became 1,000 words each (user, 2026-09-25), so a long row keeps the
+def test_a_row_too_tall_for_a_page_is_left_free_to_flow():
+    """cantSplit on a row taller than the page is destructive: it may not break, cannot fit,
+    and the overflow is simply not drawn. That lost the whole strengths and weaknesses box
+    once those became 1,000 words each (user, 2026-09-25).
+
+    The box itself is now split into one row per item so it never reaches this size, but any
+    other oversized row -- a long rationale, an analyst's pasted note -- must still keep the
     right to flow onto the next page."""
+    d = docx.Document()
+    t = d.add_table(rows=2, cols=1)
+    t.rows[0].cells[0].text = "Rationale"
+    t.rows[1].cells[0].text = "word " * 900          # far taller than a page
+    summary._keep_whole(d)
+
+    assert summary._row_height(t.rows[1]) > summary.SPLITTABLE_FROM
+    assert not t.rows[1]._tr.trPr.findall(qn("w:cantSplit")), \
+        "a row too tall for a page must be allowed to break, or its text is lost"
+    assert t.rows[0]._tr.trPr.findall(qn("w:cantSplit")), "the short header row is kept whole"
+
+
+def test_the_strengths_box_becomes_one_row_per_item(admin_client, db, monkeypatch):
+    """The template holds all five strengths and all five weaknesses in ONE table row. At
+    1,000 words a side that row is several pages tall, and a row taller than a page is at
+    the mercy of the renderer -- Word splits it, Apple Pages stops drawing at the page
+    boundary and the whole box disappears (user, 2026-09-29).
+
+    So the row is made small instead: headings in row 0, one row per item. Every row then
+    fits on a page and the break falls between items, in any renderer."""
     long_text = {**TEXT,
-                 "strengths": ["Strength. " * 120 for _ in range(5)],
-                 "weaknesses": ["Weakness. " * 120 for _ in range(5)]}
+                 "strengths": [f"Strength {i}. " + "word " * 220 for i in range(5)],
+                 "weaknesses": [f"Weakness {i}. " + "word " * 220 for i in range(5)]}
     monkeypatch.setattr(summary, "_ask_ai", lambda kind, system, user: dict(long_text))
     sid = _esg(db)
-    d = docx.Document(io.BytesIO(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content))
+    data = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content
+    d = docx.Document(io.BytesIO(data))
 
-    tall = [r for t in d.tables for r in t.rows
-            if sum(len(c.text) for c in r.cells) > summary.SPLITTABLE_FROM]
-    assert tall, "the fixture did not produce a row long enough to test"
-    for r in tall:
-        assert not r._tr.trPr.findall(qn("w:cantSplit")), \
-            "a row too tall for a page must be allowed to break, or its text is lost"
-    # And the text really is in the document rather than clipped away.
-    assert "Strength." in _text_of(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content)
+    box = next(t for t in d.tables if "supporting the rating" in t.rows[0].cells[0].text)
+    assert len(box.rows) == 6, "the box should be a heading row plus one row per item"
+    assert summary._row_height(box.rows[0]) <= summary.SPLITTABLE_FROM
+    # Not one row is taller than a page, so nothing depends on the renderer splitting one.
+    for r in box.rows[1:]:
+        assert summary._row_height(r) <= summary.SPLITTABLE_FROM
+
+    # And every item survived the rebuild, in both columns.
+    text = _text_of(data)
+    for i in range(5):
+        assert f"Strength {i}." in text and f"Weakness {i}." in text
+
+
+def test_a_short_two_column_box_is_left_alone(admin_client, db, fake_ai):
+    """The split exists to rescue page-sized rows. A box that already fits keeps the
+    client's layout exactly as drawn."""
+    sid = _esg(db)
+    d = docx.Document(io.BytesIO(admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content))
+    box = next(t for t in d.tables if "supporting the rating" in t.rows[0].cells[0].text)
+    assert len(box.rows) == 1
+
+
+def test_the_downloaded_summary_numbers_its_pages(admin_client, db, fake_ai):
+    """"Page 4 of 11" in the footer of the real file, as a Word field. Word evaluates it
+    while laying the document out, so it cannot drift from the document the way a number
+    counted here in advance would (user, 2026-09-29)."""
+    sid = _esg(db)
+    data = admin_client.get(f"/api/admin/esg/submissions/{sid}/summary").content
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        footer = z.read("word/footer1.xml").decode()
+    assert " PAGE " in footer and " NUMPAGES " in footer
+    assert 'w:dirty="true"' in footer            # recalculated when the file opens
+    assert "Internal - Confidential" in footer   # the client's own line is kept
