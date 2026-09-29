@@ -198,7 +198,8 @@ def page_units(pages: list, max_words: int = 1200) -> list[dict]:
         if not words:
             continue
         for i in range(0, len(words), max_words):
-            units.append({"page_no": p.get("page_no"), "text": " ".join(words[i:i + max_words])})
+            units.append({"page_no": p.get("page_no"), "printed_no": p.get("printed_no"),
+                          "text": " ".join(words[i:i + max_words])})
     return units
 
 
@@ -399,6 +400,11 @@ def bfsi_analyze(submission: dict, pages: list, page_rows: list | None = None) -
         "keywords": keywords,
         "negative_keywords": negative_keywords,
         "reasons": reasons,
+        # Sheet -> the number printed on that page (app/esg/extract.py). Scores stay keyed
+        # on the sheet, which is unique and is what a PDF viewer jumps to; this is only how
+        # a page is NAMED to a reader. String keys: Mongo cannot hold integer ones.
+        "page_numbers": {str(u["page_no"]): u["printed_no"] for u in units
+                         if u.get("page_no") is not None and u.get("printed_no") is not None},
         # Sector/industry as detected from the report itself — the borrower also
         # self-selects these on the form, so a mismatch is worth a look.
         "detected_sector": modal(all_results, "sector"),

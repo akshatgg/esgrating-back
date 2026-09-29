@@ -46,11 +46,21 @@ def test_front_matter_has_no_printed_number_to_cite():
 
 
 def test_a_document_whose_folios_do_not_extract_is_left_on_sheet_numbers():
-    """An image-only scan or a deck: nothing readable, so nothing is invented. Falling back
-    to the sheet is honest; guessing an offset would move every citation for no reason."""
+    """An image-only scan or a deck: nothing readable, so nothing is invented.
+
+    None, not 0. A zero offset would say "the folios were read and they match the sheets",
+    and every page would then be cited as a page number nobody ever saw."""
     pages = [_sheet(n, "text with no standalone number") for n in range(1, 40)]
-    assert extract.folio_offset(pages) == 0
-    assert extract.number_pages(pages)[10]["printed_no"] == 11
+    assert extract.folio_offset(pages) is None
+    assert extract.number_pages(pages)[10]["printed_no"] is None
+
+
+def test_an_unreadable_document_is_not_confused_with_one_numbered_from_its_first_sheet():
+    read = _report(40, offset=0)
+    unread = [_sheet(n, "text with no standalone number") for n in range(1, 40)]
+    assert extract.folio_offset(read) == 0 and extract.folio_offset(unread) is None
+    assert extract.number_pages(read)[10]["printed_no"] == 11
+    assert extract.number_pages(unread)[10]["printed_no"] is None
 
 
 def test_stray_numbers_in_tables_do_not_outvote_the_real_numbering():
@@ -64,14 +74,14 @@ def test_stray_numbers_in_tables_do_not_outvote_the_real_numbering():
 
 def test_a_folio_further_away_than_any_front_matter_is_not_believed():
     pages = [_sheet(n, "text", str(n - 300)) for n in range(301, 340)]
-    assert extract.folio_offset(pages) == 0
+    assert extract.folio_offset(pages) is None
 
 
 def test_too_few_pages_carry_a_folio_to_call_it_a_numbering_scheme():
     pages = [_sheet(n, "text") for n in range(1, 40)]
     for n in (5, 6):
         pages[n]["text"] += f"\n{n - 1}\n"
-    assert extract.folio_offset(pages) == 0
+    assert extract.folio_offset(pages) is None
 
 
 # --- how a page is named to the reader ----------------------------------------------------

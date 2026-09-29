@@ -336,6 +336,7 @@ def test_analyze_shape_scores_keywords_and_reasons(fake):
     assert out["key_metrics"] == {"employees": "10"}
     assert set(out) == {
         "e_score", "s_score", "g_score", "keywords", "negative_keywords", "reasons",
+        "page_numbers",
         "detected_sector", "detected_industry", "top_risks", "top_improvements",
         "climate_risk", "governance_summary", "key_metrics", "kpi_coverage", "scoring_method",
     }

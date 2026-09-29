@@ -16,6 +16,7 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from app.bfsi.ocr import bfsi_ocr_available, bfsi_ocr_pdf_cached
+from app.esg.extract import number_pages
 from app.core.errors import UserError
 
 OK = "ok"
@@ -82,7 +83,10 @@ def bfsi_extract_detailed(path: Path) -> dict:
     above>, "truncated": bool, "detail": str}.
     """
     def result(pages, source, reason, truncated=False, detail=""):
-        return {"pages": pages, "source": source, "reason": reason,
+        # Each page also carries the number PRINTED on it, not just the sheet the PDF
+        # counts from the cover -- the same measurement the ESG side makes, so both
+        # calculators cite a page by the number the reader can see (user, 2026-09-29).
+        return {"pages": number_pages(pages), "source": source, "reason": reason,
                 "truncated": truncated, "detail": detail}
 
     if not path.is_file() or not os.access(path, os.R_OK):

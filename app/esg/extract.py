@@ -74,8 +74,13 @@ def _folio_candidates(text: str) -> set[int]:
     return found
 
 
-def folio_offset(pages: list[dict]) -> int:
-    """sheet - printed folio for this document, or 0 when it cannot be established.
+def folio_offset(pages: list[dict]) -> int | None:
+    """sheet - printed folio for this document, or None when it cannot be established.
+
+    None and 0 are different answers and must not be confused: 0 means the folios were read
+    and they match the sheets, so a page may be cited as a page. None means no numbering
+    could be read at all, and citing the sheet as a page number would be a claim about a
+    number nobody saw -- exactly the fault this exists to fix.
 
     Only non-negative offsets are considered: front matter means the folio runs behind the
     sheet, never ahead of it, and allowing the other direction would let a table of figures
@@ -92,17 +97,17 @@ def folio_offset(pages: list[dict]) -> int:
             voted += 1
             votes.update(offsets)
     if not votes:
-        return 0
+        return None
     offset, count = votes.most_common(1)[0]
     if count < MIN_FOLIO_VOTES or count < voted * MIN_FOLIO_SHARE:
-        return 0
+        return None
     return offset
 
 
-def printed_page(sheet: int, offset: int) -> int | None:
-    """The number printed on that sheet, or None for front matter -- the cover and whatever
-    else sits before the report starts counting, which carries no folio to cite."""
-    if not isinstance(sheet, int):
+def printed_page(sheet: int, offset: int | None) -> int | None:
+    """The number printed on that sheet, or None when there is none to cite -- front matter,
+    or a document whose numbering could not be read at all."""
+    if offset is None or not isinstance(sheet, int):
         return None
     printed = sheet - offset
     return printed if printed >= 1 else None

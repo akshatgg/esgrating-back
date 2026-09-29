@@ -95,11 +95,13 @@ def test_ocr_success_populates_source_and_is_cached_on_second_call(tmp_path, db,
     r1 = bfsi_extract_detailed(path)
     assert r1["source"] == "ocr"
     assert r1["reason"] == "ok"
-    assert r1["pages"] == [{"page_no": 1, "text": "ocr recovered text"}]
+    # printed_no: the number printed on the page. None here -- one OCR'd page carries no
+    # readable folio, and a sheet must not be passed off as a page number.
+    assert r1["pages"] == [{"page_no": 1, "text": "ocr recovered text", "printed_no": None}]
     assert len(calls) == 1
 
     r2 = bfsi_extract_detailed(path)
     assert r2["source"] == "ocr"
-    assert r2["pages"] == [{"page_no": 1, "text": "ocr recovered text"}]
+    assert r2["pages"] == [{"page_no": 1, "text": "ocr recovered text", "printed_no": None}]
     # Second call hit the bfsi_ocr_cache collection -- the OCR function was not re-run.
     assert len(calls) == 1
