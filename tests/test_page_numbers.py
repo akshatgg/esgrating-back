@@ -163,3 +163,23 @@ def test_the_page_number_is_appended_to_the_classification_line():
     footer.paragraphs[0].text = summary._FOOTER_ANCHOR
     summary._number_pages(d)
     assert len(footer.paragraphs) == 1
+
+
+# --- relabelling a citation must not throw away a stored narrative -----------------------
+
+def test_relabelling_citations_keeps_the_stored_narrative():
+    """The narrative is cached against a fingerprint of the prompt. Correcting citations to
+    the printed page changed every prompt, which marked every stored narrative stale and
+    blanked the strengths, weaknesses, priorities and rationale on every existing report
+    (user, 2026-09-30). How a page is LABELLED is not part of the rating."""
+    legacy = 'Rating data (JSON):\n{"page_reasons": ["Environment p.34: because"]}'
+    relabelled = 'Rating data (JSON):\n{"page_reasons": ["Environment PDF sheet 34: because"]}'
+    assert summary._fingerprint(legacy) == summary._fingerprint(relabelled)
+
+
+def test_a_genuinely_different_page_still_rewrites_the_narrative():
+    """Normalising the label must not blind the fingerprint: once the printed number is
+    known, prose quoting the old one is out of date and is rewritten."""
+    before = 'Rating data (JSON):\n{"page_reasons": ["Environment p.34: because"]}'
+    after = 'Rating data (JSON):\n{"page_reasons": ["Environment p.32: because"]}'
+    assert summary._fingerprint(before) != summary._fingerprint(after)

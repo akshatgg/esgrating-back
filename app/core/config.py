@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # inferenceTypesSupported=["INFERENCE_PROFILE"], so the bare model id is rejected and
     # every call fails. "in." keeps inference in India; "global." would route anywhere.
     # gpt-oss is served by AWS directly, so it needs no Marketplace subscription and works
-    # on a fresh account. gpt-5.6 and the Claude models need an accepted agreement and a
+    # on a fresh account. gpt-5.6 and the Anthropic models need an accepted agreement and a
     # valid payment instrument, so neither is safe as a default: selecting AWS would fail
     # every call. An admin picks a different one on the dashboard.
     esg_bedrock_model: str = "openai.gpt-oss-120b-1:0"

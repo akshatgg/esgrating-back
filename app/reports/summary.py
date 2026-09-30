@@ -562,10 +562,22 @@ def _user_payload(facts: dict) -> str:
     return "Rating data (JSON):\n" + json.dumps(_narrative_input(facts), ensure_ascii=False)
 
 
+# "PDF sheet 34" back to "p.34" before hashing -- see _fingerprint.
+_STABLE_CITE = re.compile(rf"{SHEET} (\d+)")
+
+
 def _fingerprint(user: str) -> str:
     """Identifies the rating the text was written for. It covers the schema version as
-    well as the data, so text written to an older brief is never reused."""
-    return hashlib.sha256(f"v{NARRATIVE_VERSION}\n{user}".encode()).hexdigest()
+    well as the data, so text written to an older brief is never reused.
+
+    How a page is LABELLED is not part of the rating, so it is normalised away first. The
+    fingerprint is taken over the prompt, and correcting citations to the printed page
+    number changed every prompt -- which marked every stored narrative stale at once and
+    blanked the strengths, weaknesses, priorities and rationale on every existing report
+    (user, 2026-09-30). A report whose page numbers genuinely change still rescores and
+    rewrites; a report that only had its citations relabelled keeps the text it has."""
+    stable = _STABLE_CITE.sub(r"p.\1", user)
+    return hashlib.sha256(f"v{NARRATIVE_VERSION}\n{stable}".encode()).hexdigest()
 
 
 def fresh_narrative(kind: str, doc: dict) -> dict | None:
