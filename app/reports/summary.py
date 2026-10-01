@@ -1230,8 +1230,17 @@ NARRATIVE_EDIT_KEYS = ("executive_summary", "favourable_factors", "constraints",
                        "rating_interpretation", "controversy_status")
 
 
-# "(PDF 107)", "PDF sheet 107", "PDF p.107" -> "p.107".
-_OLD_CITE = re.compile(r"\bPDF[ \u00a0]*(?:sheet[ \u00a0]*|p\.?[ \u00a0]*)?(\d+)")
+# "(PDF 107)", "PDF sheet 107", "PDF sheets 74, 506, 165, and 554" -> "p.107", "p.74, p.506,
+# p.165, and p.554". \s rather than a literal space: the model separates the words with
+# no-break and narrow no-break spaces as readily as with ordinary ones.
+_OLD_CITE = re.compile(
+    r"\bPDF\s*(?:sheets?|pages?|pp?\.?)?\s*(\d+(?:\s*(?:,\s*and|,|and|&|-|\u2013)\s*\d+)*)",
+    re.IGNORECASE)
+_NUMBER = re.compile(r"\d+")
+
+
+def _relabel(match) -> str:
+    return _NUMBER.sub(lambda n: f"p.{n.group(0)}", match.group(1))
 
 
 def _one_citation_form(value):
@@ -1241,7 +1250,7 @@ def _one_citation_form(value):
     wording in their stored prose. Rewriting them costs an AI call per report; the page they
     point at is the same either way, so the label is corrected where the text is read."""
     if isinstance(value, str):
-        return _OLD_CITE.sub(r"p.\1", value)
+        return _OLD_CITE.sub(_relabel, value)
     if isinstance(value, list):
         return [_one_citation_form(v) for v in value]
     if isinstance(value, dict):

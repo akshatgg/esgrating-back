@@ -192,3 +192,17 @@ def test_stored_prose_with_the_old_wording_is_shown_in_the_one_form():
     assert out["pillar_narratives"]["E"] == "recycling rate of 98 % (p.107) and policy (p.138)"
     assert out["strengths"][0]["detail"] == "disclosed on p.127"
     assert out["rating_rationale"] == "The PDF itself is long; see p.12."
+
+
+def test_lists_and_unusual_spaces_in_old_citations_are_relabelled_too():
+    """Seen on a live report (user, 2026-10-02): a list of sheets, and words separated by a
+    narrow no-break space, both slipped past the first version of the relabelling."""
+    text = {"strengths": [
+        "privacy-protection policy (PDF sheet\u202f199) and frameworks (PDF sheet\u00a0326)",
+        "Evidence on PDF sheets\u202f74,\u202f506,\u202f165, and\u202f554 details programmes",
+        "see PDF pages 12 and 14, and PDF sheet 20-22",
+    ]}
+    out = summary.with_edits(text, {})["strengths"]
+    assert out[0] == "privacy-protection policy (p.199) and frameworks (p.326)"
+    assert out[1] == "Evidence on p.74,\u202fp.506,\u202fp.165, and\u202fp.554 details programmes"
+    assert out[2] == "see p.12 and p.14, and p.20-p.22"
