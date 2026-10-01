@@ -138,6 +138,17 @@ def run_esg_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
     for slot in ("logo", "corner_logo"):
         delete_logo_file(edits_before.get(slot))
 
+    # The written rating, for the scores just stored. An analysis used to leave this to the
+    # first Word download, so after a re-run the preview showed the new scores with no text
+    # -- or the fallback paragraphs -- until someone downloaded the summary, and only then
+    # caught up (user, 2026-10-02). Written here, inside the job, so the preview is complete
+    # the moment the analysis reports done. Best effort: a failed write never fails a run
+    # that produced good scores, and the download still writes it.
+    from app.reports import summary
+    fresh = esg_submissions_collection().find_one({"_id": sub_id})
+    if fresh:
+        summary.write_narrative("esg", fresh)
+
 
 
 def serialize_doc(obj):

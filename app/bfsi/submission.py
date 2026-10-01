@@ -175,3 +175,11 @@ def run_bfsi_analysis(sub_id: ObjectId, use_cache: bool = True) -> None:
 
     store.report_insert(sub_id, sub["file_path"], ai.get("reasons") or [], ov["overall"], pages=page_rows)
 
+    # The written rating for the scores just stored, so the preview is complete when the
+    # analysis reports done instead of catching up after the first Word download (user,
+    # 2026-10-02). Best effort: a failed write never fails the run.
+    from app.reports import summary
+    fresh = store.submissions_collection().find_one({"_id": sub_id})
+    if fresh:
+        summary.write_narrative("bfsi", fresh)
+

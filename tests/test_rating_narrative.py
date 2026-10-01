@@ -215,11 +215,27 @@ def test_driver_corrections_are_validated(admin_client, db):
 
 # --- the one-pager first, the other reports on request (user, 2026-09-21) -------------
 
-def test_analysing_writes_no_prose(admin_client, db, monkeypatch):
-    """An analysis produces the scores and the one-pager. The written rating costs two
-    calls and half a minute, and most submissions never open a report that uses it."""
-    import app.esg.submissions as subs
-    assert "write_narrative" not in pathlib.Path(subs.__file__).read_text()
+def test_analysing_writes_the_prose_as_its_last_step():
+    """An analysis used to stop at the scores and leave the written rating to the first
+    download (user, 2026-09-21). After a re-run that left the preview showing new scores with
+    no text until someone downloaded the summary, so the decision was reversed: the text is
+    written inside the analysis job, for both calculators (user, 2026-10-02)."""
+    import app.bfsi.submission as bfsi_subs
+    import app.esg.submissions as esg_subs
+    assert 'summary.write_narrative("esg", fresh)' in pathlib.Path(esg_subs.__file__).read_text()
+    assert 'summary.write_narrative("bfsi", fresh)' in pathlib.Path(bfsi_subs.__file__).read_text()
+
+
+def test_a_failed_write_never_fails_the_analysis(db, monkeypatch):
+    """Best effort: good scores are kept even when the text could not be written, and the
+    download or the generate button writes it later."""
+    def boom(kind, doc, facts):
+        raise RuntimeError("model unavailable")
+
+    sid = _esg(db)
+    monkeypatch.setattr(summary, "ai_configured", lambda kind: True)
+    monkeypatch.setattr(summary, "narrative", boom)
+    assert summary.write_narrative("esg", db.esg_submissions.find_one({"_id": sid})) is False
 
 
 def test_generate_reports_writes_the_narrative(admin_client, db, ai):

@@ -528,8 +528,12 @@ def _narrative_input(f: dict) -> dict:
 
 
 def ai_configured(kind: str) -> bool:
-    """Whether this calculator has an OpenAI key. Without one there is nothing to ask, and
-    trying anyway costs a full round of network retries before it fails."""
+    """Whether there is a model to ask: AWS selected and usable, or an OpenAI key for this
+    calculator. Without one, trying anyway costs a full round of network retries before it
+    fails."""
+    from app.core import llm_settings
+    if llm_settings.resolve() == llm_settings.AWS:
+        return True
     return bool(settings.bfsi_openai_api_key if kind == "bfsi" else settings.esg_openai_api_key)
 
 
