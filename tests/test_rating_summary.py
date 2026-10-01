@@ -125,9 +125,7 @@ def test_esg_summary_download(admin_client, db, fake_ai):
     # KPI table: the client's 8 columns -- pillar, theme, KPI, score, weight/importance,
     # key evidence, status, data note. Importance is "\u2014" here because this report was
     # scored without the library's materiality (app/reports/summary.py _importance).
-    # "PDF sheet 3", not "p. 3": this fixture stores no page_numbers, so the number printed
-    # on that page is unknown and the sheet is named as a sheet rather than passed off as one.
-    assert ("Environment | Water | Water withdrawn | 90 | \u2014 | Found on PDF sheet 3 | Strong | "
+    assert ("Environment | Water | Water withdrawn | 90 | \u2014 | Found on p. 3 | Strong | "
             "Strong: targets met, measured improvement or assurance") in text
     assert ("Environment | Waste | Waste management policy | 0 | \u2014 | Not addressed in the report | "
             "Not found | Not found in the report") in text

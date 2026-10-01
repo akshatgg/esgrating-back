@@ -136,32 +136,29 @@ def _printed(page, numbers: dict | None):
 
 
 def _page_label(page, numbers: dict | None) -> str:
-    """The bare number to show for one page."""
+    """The number to show for one page: the one printed on it where that is known, the
+    sheet otherwise."""
     printed = _printed(page, numbers)
-    return str(printed) if printed is not None else f"{SHEET} {page}"
+    return str(printed if printed is not None else page)
 
 
 def _cite(page, numbers: dict | None) -> str:
-    """One page as a citation: "p.32", or "PDF sheet 34" where the folio is unknown. Named
-    as a sheet rather than passed off as a page number, so a reader who cannot find page 34
-    knows which number they are holding."""
-    printed = _printed(page, numbers)
-    return f"p.{printed}" if printed is not None else f"{SHEET} {page}"
+    """One page as a citation, always "p.32".
+
+    A page whose printed number could not be read was cited as "PDF sheet 34" to keep the
+    two numbering schemes apart, and the narrative model shortened that to "(PDF 107)"
+    throughout the report. The client wants one form everywhere (user, 2026-10-02), so the
+    sheet number is cited as a page number where it is the only number there is."""
+    return f"p.{_page_label(page, numbers)}"
 
 
 def _pages(pages, numbers: dict | None = None) -> str:
-    """The "Source pages" cell. All printed or all sheets, never a mixture: two numbering
-    schemes in one list is how the reader was misled in the first place."""
-    items = list(pages or [])
+    """The "Source pages" cell."""
+    items = [_page_label(p, numbers) for p in pages or []]
     if not items:
         return "Not found in the report"
-    printed = [_printed(p, numbers) for p in items]
-    if all(n is not None for n in printed):
-        labels, lead = [str(n) for n in printed], "Found on p."
-    else:
-        labels, lead = [str(p) for p in items], f"Found on {SHEET}"
-    shown = ", ".join(labels[:6]) + (f" +{len(items) - 6} more" if len(items) > 6 else "")
-    return f"{lead} {shown}"
+    shown = ", ".join(items[:6]) + (f" +{len(items) - 6} more" if len(items) > 6 else "")
+    return f"Found on p. {shown}"
 
 
 def build_facts(kind: str, doc: dict) -> dict:
@@ -422,9 +419,28 @@ LENGTH = (
     "the strengths, the weaknesses, the pillar narratives and the rating rationale change."
 )
 
-NARRATIVE_SYSTEM = prompts.load("narrative_system") + LENGTH
+# Where the evidence was found. Some reports came back with no page reference anywhere in
+# their prose and others with one on every claim, because nothing asked for them (user,
+# 2026-10-02). The data gives the page beside each piece of evidence, so it is asked for.
+CITATIONS = (
+    "\n\n"
+    "========================================================\n"
+    "PAGE REFERENCES\n"
+    "========================================================\n"
+    "The validated data gives the page each piece of evidence was found on, written as "
+    "p.12. Whenever you describe a piece of evidence -- a figure, a policy, a target, a "
+    "certification, a programme, an incident -- give its page in brackets straight after "
+    "it, in exactly that form: (p.12). Do this in every pillar narrative, every strength, "
+    "every weakness and the rating rationale, wherever the data supplies a page.\n"
+    "\n"
+    "Use only the page numbers supplied with the data; never invent one, and leave the "
+    "reference out where the data gives no page -- a KPI that was not disclosed has none. "
+    "Always write p. followed by the number: never 'PDF', 'sheet', 'page' or 'pg'.\n"
+)
 
-DRIVERS_SYSTEM = prompts.load("drivers_system") + LENGTH
+NARRATIVE_SYSTEM = prompts.load("narrative_system") + LENGTH + CITATIONS
+
+DRIVERS_SYSTEM = prompts.load("drivers_system") + LENGTH + CITATIONS
 
 # His section 26 asks for every field in one answer. That was already too much before the
 # length minimums -- production returned valid JSON with the drivers simply absent, which
@@ -1166,11 +1182,30 @@ NARRATIVE_EDIT_KEYS = ("executive_summary", "favourable_factors", "constraints",
                        "rating_interpretation", "controversy_status")
 
 
+# "(PDF 107)", "PDF sheet 107", "PDF p.107" -> "p.107".
+_OLD_CITE = re.compile(r"\bPDF[ \u00a0]*(?:sheet[ \u00a0]*|p\.?[ \u00a0]*)?(\d+)")
+
+
+def _one_citation_form(value):
+    """Text already written with "(PDF 107)" in it, shown as "(p.107)".
+
+    Narratives written while an unreadable page was cited as "PDF sheet 107" carry that
+    wording in their stored prose. Rewriting them costs an AI call per report; the page they
+    point at is the same either way, so the label is corrected where the text is read."""
+    if isinstance(value, str):
+        return _OLD_CITE.sub(r"p.\1", value)
+    if isinstance(value, list):
+        return [_one_citation_form(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _one_citation_form(v) for k, v in value.items()}
+    return value
+
+
 def with_edits(text: dict, doc: dict) -> dict:
     """The narrative as the analyst left it. A correction made in the report has to reach
     the Word summary too, or the two documents say different things about the same rating."""
     fields = (doc.get("report_edits") or {}).get("fields") or {}
-    out = dict(text or {})
+    out = _one_citation_form(dict(text or {}))
     for key in NARRATIVE_EDIT_KEYS:
         if key not in fields:
             continue

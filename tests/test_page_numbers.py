@@ -90,26 +90,23 @@ def test_a_page_is_cited_by_the_number_printed_on_it():
     assert summary._page_label(34, {"34": 32}) == "32"
 
 
-def test_a_page_with_no_printed_number_is_named_as_a_sheet():
-    """Never passed off as a page number: the reader would look in the wrong place, which is
-    the whole complaint."""
-    assert summary._page_label(2, {"34": 32}) == "PDF sheet 2"
-    assert summary._page_label(34, {}) == "PDF sheet 34"
-    assert summary._page_label(34, None) == "PDF sheet 34"
+def test_a_page_with_no_printed_number_is_still_cited_as_p():
+    """One form everywhere: "PDF sheet 34" came out of the narrative model as "(PDF 34)"
+    all through a report (user, 2026-10-02)."""
+    assert summary._cite(34, {}) == "p.34"
+    assert summary._cite(34, None) == "p.34"
+    assert summary._cite(34, {"34": 32}) == "p.32"
+    assert summary._page_label(2, {"34": 32}) == "2"
 
 
 def test_the_source_pages_column_uses_the_printed_numbers():
     assert summary._pages([34, 35], {"34": 32, "35": 33}) == "Found on p. 32, 33"
+    assert summary._pages([3], {}) == "Found on p. 3"
 
 
-def test_source_pages_never_mixes_the_two_numbering_schemes():
-    """One list carrying "32, PDF sheet 2" is exactly the confusion this fixes. If any page
-    in the list has no folio, the whole list is given as sheets."""
-    assert summary._pages([2, 34], {"34": 32}) == "Found on PDF sheet 2, 34"
-
-
-def test_source_pages_falls_back_to_sheets_on_a_report_scored_before_this_existed():
-    assert summary._pages([3], {}) == "Found on PDF sheet 3"
+def test_the_narrative_is_asked_to_cite_pages_in_one_form():
+    for system in (summary.NARRATIVE_SYSTEM, summary.DRIVERS_SYSTEM):
+        assert "PAGE REFERENCES" in system and "(p.12)" in system
 
 
 def test_kpi_evidence_quotes_the_printed_page():
@@ -121,7 +118,7 @@ def test_kpi_evidence_quotes_the_printed_page():
 def test_kpi_evidence_falls_back_to_the_sheet_when_the_folio_is_unknown():
     row = {"kpi": "Water withdrawn", "score": 90,
            "evidence": {"page": 34, "reason": "22% reduction"}}
-    assert "PDF sheet 34:" in summary._kpi_evidence(row, {})
+    assert "p.34:" in summary._kpi_evidence(row, {})
 
 
 # --- the page number in the Word footer ---------------------------------------------------
@@ -183,3 +180,15 @@ def test_a_genuinely_different_page_still_rewrites_the_narrative():
     before = 'Rating data (JSON):\n{"page_reasons": ["Environment p.34: because"]}'
     after = 'Rating data (JSON):\n{"page_reasons": ["Environment p.32: because"]}'
     assert summary._fingerprint(before) != summary._fingerprint(after)
+
+
+def test_stored_prose_with_the_old_wording_is_shown_in_the_one_form():
+    """Existing narratives say "(PDF 107)"; they are relabelled where they are read, not
+    rewritten, so no report needs an AI call to be corrected (user, 2026-10-02)."""
+    text = {"pillar_narratives": {"E": "recycling rate of 98 % (PDF 107) and policy (PDF sheet 138)"},
+            "strengths": [{"headline": "Waste", "detail": "disclosed on PDF\u00a0127"}],
+            "rating_rationale": "The PDF itself is long; see p.12."}
+    out = summary.with_edits(text, {})
+    assert out["pillar_narratives"]["E"] == "recycling rate of 98 % (p.107) and policy (p.138)"
+    assert out["strengths"][0]["detail"] == "disclosed on p.127"
+    assert out["rating_rationale"] == "The PDF itself is long; see p.12."
