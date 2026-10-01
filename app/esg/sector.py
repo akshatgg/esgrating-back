@@ -97,11 +97,9 @@ def available() -> bool:
     return bool(settings.esg_openai_api_key) and llm_settings.resolve() == llm_settings.OPENAI
 
 
-def lookup(company_name: str, client=None) -> dict | None:
-    """{company_name, stock_exchange, ticker, sector, source, verification_date}, or None.
-
-    None is a normal outcome, not an error: it means nothing was verified, and the report
-    shows a blank the analyst can fill rather than a sector nobody checked."""
+def search(company_name: str, client=None) -> dict | None:
+    """The listing as read off the web: {company_name, stock_exchange, ticker, sector,
+    source, verification_date}, or None when nothing could be verified."""
     company_name = (company_name or "").strip()
     if not company_name or (client is None and not available()):
         return None
@@ -127,3 +125,70 @@ def lookup(company_name: str, client=None) -> dict | None:
         logger.warning("sector lookup: no verified listing for %s", company_name)
         return None
     return None
+
+
+# --- From the model's own knowledge ------------------------------------------------------
+#
+# The client's brief asks for a web lookup and rules general knowledge out. Bedrock has no
+# web search, so with billing on AWS the sector was simply blank on every report, and the
+# decision was taken to accept the model's own knowledge there instead (user, 2026-10-01).
+#
+# What keeps that honest is the record: an answer from knowledge is stored with the source
+# below and no verification date, so it can never be mistaken for one read off the exchange,
+# and nothing invents a link or a date to dress it up.
+KNOWLEDGE_SYSTEM = prompts.load("sector_from_knowledge")
+UNVERIFIED_SOURCE = "AI model knowledge - not verified against the exchange"
+
+
+def _knowledge_prompt(company_name: str) -> str:
+    from app.esg import methodology
+
+    groups = "\n".join(f"- {name}" for name in methodology.SECTOR_MATERIALITY)
+    return (f"{KNOWLEDGE_SYSTEM}\n\nSector groups:\n{groups}\n\n"
+            f"Company name: {company_name}")
+
+
+def from_knowledge(company_name: str, llm=None) -> dict | None:
+    """The listing from the scoring model's own knowledge, marked as unverified, or None.
+
+    Goes through whichever model the dashboard has selected, so on AWS it is billed to AWS
+    and no OpenAI key is involved."""
+    company_name = (company_name or "").strip()
+    if not company_name:
+        return None
+    if llm is None:
+        if llm_settings.resolve() == llm_settings.OPENAI and not settings.esg_openai_api_key:
+            return None  # no model to ask
+        try:
+            from app.esg import llm as llm_mod
+            llm = llm_mod.get_llm()
+        except Exception as e:
+            logger.warning("sector from knowledge: no model for %s: %s", company_name, e)
+            return None
+    try:
+        data = _parse(llm.generate_score(_knowledge_prompt(company_name)))
+    except Exception as e:
+        logger.warning("sector from knowledge: failed for %s: %s", company_name, e)
+        return None
+    sector_name = str((data or {}).get("sector") or "").strip()
+    if not sector_name:
+        logger.warning("sector from knowledge: model gave no sector for %s", company_name)
+        return None
+    listing = {
+        "company_name": str(data.get("company_name") or "").strip() or company_name,
+        "stock_exchange": str(data.get("stock_exchange") or "").strip(),
+        "ticker": str(data.get("ticker") or "").strip(),
+        "sector": sector_name,
+        "source": UNVERIFIED_SOURCE,
+        "verification_date": "",
+    }
+    logger.info("sector from knowledge: %s -> %s (%s %s), unverified", company_name,
+                listing["sector"], listing["stock_exchange"], listing["ticker"])
+    return listing
+
+
+def lookup(company_name: str) -> dict | None:
+    """The company's listing: read off the web where a search can run, otherwise from the
+    model's own knowledge and marked as unverified. None when neither gives a sector, and
+    the report then shows a blank an analyst can fill."""
+    return search(company_name) or from_knowledge(company_name)
