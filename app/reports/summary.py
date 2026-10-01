@@ -541,7 +541,34 @@ def _ask_ai(kind: str, system: str, user: str) -> dict:
         return openai_client.get_client().json(user, system)
     from app.esg import llm as llm_mod
     raw = llm_mod.get_llm().generate_score(system + "\n\n" + user)
-    return json.loads(raw)
+    return _read_json(raw)
+
+
+_JSON_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+
+
+def _read_json(raw) -> dict:
+    """A model's JSON answer, read as forgivingly as is safe.
+
+    Bedrock's Converse API has no JSON mode, so the answer is only as well formed as the
+    model made it: a code fence round it, a sentence before it, or a trailing comma after
+    the last item of a long list. Read strictly, one stray comma in 1,000 words of prose
+    threw the whole narrative away and the report showed no written text at all (production,
+    2026-10-02). Each repair below removes something that carries no meaning; text that
+    still does not parse is an error, and the caller asks again."""
+    body = _JSON_FENCE.sub("", str(raw or "")).strip()
+    candidates = [body]
+    start, end = body.find("{"), body.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(body[start:end + 1])
+    for text in candidates:
+        for attempt in (text, _TRAILING_COMMA.sub(r"\1", text)):
+            try:
+                return json.loads(attempt)
+            except Exception:
+                continue
+    return json.loads(body)   # raises, with the parser's own message
 
 
 def _collection(kind: str):
@@ -617,6 +644,29 @@ def fresh_narrative(kind: str, doc: dict) -> dict | None:
     return text if cached.get("fingerprint") == current else None
 
 
+# How many times one pass is asked before the narrative is given up on.
+PASS_ATTEMPTS = 3
+
+
+def _ask_pass(kind: str, system: str, user: str, required: tuple, what: str) -> dict:
+    """One pass of the narrative, asked again when the answer cannot be used.
+
+    A pass is four long calls' worth of work away from a finished narrative, and a single
+    unreadable or incomplete answer used to discard all of it. The model is not
+    deterministic about its formatting, so asking again usually succeeds."""
+    last = None
+    for attempt in range(1, PASS_ATTEMPTS + 1):
+        try:
+            answer = _ask_ai(kind, system, user)
+            _require(answer, required, what)
+            return answer
+        except Exception as e:
+            last = e
+            logger.warning("rating summary narrative: %s, attempt %d of %d failed: %s",
+                           what, attempt, PASS_ATTEMPTS, e)
+    raise last
+
+
 def narrative(kind: str, doc: dict, facts: dict) -> dict:
     user = _user_payload(facts)
     fingerprint = _fingerprint(user)
@@ -630,9 +680,7 @@ def narrative(kind: str, doc: dict, facts: dict) -> dict:
             # and rationale; the narrative prompt covers the summary and the pillars.
             system = DRIVERS_SYSTEM if required[0] in ("strengths", "weaknesses", "rating_rationale") \
                 else NARRATIVE_SYSTEM
-            answer = _ask_ai(kind, system + _only(required, optional), user)
-            _require(answer, required, what)
-            text.update(answer)
+            text.update(_ask_pass(kind, system + _only(required, optional), user, required, what))
         text = _join_paragraphs(text)
     except Exception as e:
         logger.error("rating summary narrative failed: %s", e)

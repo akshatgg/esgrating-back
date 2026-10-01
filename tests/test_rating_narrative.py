@@ -439,3 +439,53 @@ def test_clearing_a_corrected_reason_restores_the_ai_text(admin_client, db):
 
     row = admin_client.get(base).json()["effective"]["final"]["kpi_coverage"]["Environment"]["kpis"][0]
     assert row["evidence"]["reason"] == "what the AI wrote"
+
+
+# --- answers that are not quite JSON, and passes that are asked again ---------------------
+
+def test_a_trailing_comma_or_a_fence_does_not_cost_the_narrative():
+    """Bedrock has no JSON mode. One stray comma in 1,000 words of prose threw the whole
+    narrative away and the report showed no written text (production, 2026-10-02)."""
+    from app.reports import summary
+    assert summary._read_json('{"a": ["x", "y",],\n "b": {"c": 1,},}') == {"a": ["x", "y"], "b": {"c": 1}}
+    assert summary._read_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert summary._read_json('Here is the result:\n{"a": 1}\nDone.') == {"a": 1}
+
+
+def test_text_that_is_not_json_is_still_an_error():
+    import pytest
+    from app.reports import summary
+    with pytest.raises(Exception):
+        summary._read_json("An unexpected error occurred: throttled")
+
+
+def test_a_pass_is_asked_again_when_its_answer_cannot_be_used(monkeypatch):
+    from app.reports import summary
+    answers = [ValueError("bad json"), {"strengths": []}, {"strengths": ["a"]}]
+    calls = []
+
+    def fake(kind, system, user):
+        calls.append(1)
+        value = answers.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(summary, "_ask_ai", fake)
+    assert summary._ask_pass("esg", "s", "u", ("strengths",), "drivers") == {"strengths": ["a"]}
+    assert len(calls) == 3
+
+
+def test_a_pass_that_never_answers_gives_up_after_three_tries(monkeypatch):
+    import pytest
+    from app.reports import summary
+    calls = []
+
+    def fake(kind, system, user):
+        calls.append(1)
+        raise ValueError("bad json")
+
+    monkeypatch.setattr(summary, "_ask_ai", fake)
+    with pytest.raises(ValueError):
+        summary._ask_pass("esg", "s", "u", ("strengths",), "drivers")
+    assert len(calls) == summary.PASS_ATTEMPTS
