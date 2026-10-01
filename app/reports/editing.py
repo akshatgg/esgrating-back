@@ -594,10 +594,18 @@ def _kpis_editable(kind: str, base: dict, kpis: dict) -> dict:
     """Per category: do the KPI scores reproduce the stored pillar score? Only then can a
     KPI edit recompute the pillar soundly (as _pages_editable for pages)."""
     out = {}
+    holder = base if kind == "esg" else (base.get("ai_analysis") or {})
+    coverage = holder.get("kpi_coverage") if isinstance(holder, dict) else None
     for cat in CATS:
-        best = {r["kpi"]: r["score"] for r in kpis[cat]}
         key = f"{ESG_PREFIX[cat]}_score" if kind == "esg" else BFSI_SCORE_KEY[cat]
-        out[cat] = bool(best) and _same(esg_scoring.category_score(best), base.get(key))
+        detail = (coverage or {}).get(ESG_CATEGORY[cat]) if isinstance(coverage, dict) else None
+        if not kpis[cat] or not isinstance(detail, dict):
+            out[cat] = False
+            continue
+        # Rescored the way an edit would rescore it -- the methodology roll-up where the
+        # pillar was scored by it, the flat average otherwise -- so the check asks the
+        # question that matters: would saving an edit reproduce this pillar?
+        out[cat] = _same(esg_scoring.rescore_category(detail, {})["score"], base.get(key))
     return out
 
 

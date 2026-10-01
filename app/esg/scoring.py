@@ -485,17 +485,43 @@ def kpi_row(kpi: str, score: float, pages: list, capped: bool = False, evidence:
     return row
 
 
+# What the methodology roll-up reads off a KPI row beside its score. An edit changes the
+# score only; these stay with the row, or the rescored pillar could not be weighted.
+_ROLLUP_FIELDS = ("theme", "key_issue", "evidence_type", "materiality")
+
+
 def rescore_category(detail: dict, scores: dict[str, float]) -> dict:
     """The KPI Assessment with some KPI scores replaced (admin edits), and its score. The
-    detail keeps its own method, so an older report keeps its older layout."""
+    detail keeps its own method, so an older report keeps its older layout.
+
+    A pillar scored by the methodology roll-up (category_detail with `meta`) is rescored by
+    the same roll-up. It used to be rescored as a flat average, which no longer matched the
+    stored pillar score once the roll-up existed -- so the editor judged every KPI score
+    unsafe to edit and locked them all (user, 2026-10-01)."""
     detail = dict(detail)
-    # An analyst's own number replaces the AI's and is never capped again; an untouched
-    # row keeps the cap it was scored with.
-    detail["kpis"] = [kpi_row(r["kpi"], scores.get(r["kpi"], kpi_best(r)), r.get("pages") or [],
-                              bool(r.get("capped")) and r["kpi"] not in scores,
-                              None if r["kpi"] in scores else r.get("evidence"))
-                      for r in detail.get("kpis") or []]
-    detail["score"] = category_score({r["kpi"]: r["score"] for r in detail["kpis"]})
+    rows = []
+    for r in detail.get("kpis") or []:
+        # An analyst's own number replaces the AI's and is never capped again; an untouched
+        # row keeps the cap it was scored with.
+        row = kpi_row(r["kpi"], scores.get(r["kpi"], kpi_best(r)), r.get("pages") or [],
+                      bool(r.get("capped")) and r["kpi"] not in scores,
+                      None if r["kpi"] in scores else r.get("evidence"))
+        for field in _ROLLUP_FIELDS:
+            if field in r:
+                row[field] = r[field]
+        rows.append(row)
+    detail["kpis"] = rows
+    detail["score"] = category_score({r["kpi"]: r["score"] for r in rows})
+    if isinstance(detail.get("weighting"), dict):
+        weighted = methodology.aggregate([
+            {"score": r["score"], "theme": r.get("theme", ""), "key_issue": r.get("key_issue", ""),
+             "evidence_type": r.get("evidence_type"), "materiality": r["materiality"]}
+            for r in rows if "materiality" in r])
+        if weighted["score"] is not None:
+            detail["score"] = weighted["score"]
+            detail["weighting"] = {**detail["weighting"], "themes": weighted["themes"],
+                                   "applicable": weighted["applicable"],
+                                   "excluded": weighted["excluded"]}
     return detail
 
 

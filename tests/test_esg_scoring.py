@@ -292,3 +292,36 @@ def test_an_admin_can_pick_which_bedrock_model_scores(monkeypatch, db):
 
     with pytest.raises(UserError):
         llm_settings.set_bedrock_model("openai.gpt-5.6-luna", "admin")   # not yet available
+
+
+# --- editing a KPI score on a pillar scored by the methodology roll-up --------------------
+
+def _rolled_up_detail():
+    from app.esg import scoring
+    kpis = ["Water withdrawn", "Water targets", "Waste policy"]
+    meta = {"Water withdrawn": {"theme": "Water", "key_issue": "Water use"},
+            "Water targets": {"theme": "Water", "key_issue": "Water use"},
+            "Waste policy": {"theme": "Waste", "key_issue": "Waste management"}}
+    pages = [(3, {"Water withdrawn": 90, "Water targets": 40}, {}, {"Water withdrawn": "Audited data"})]
+    return scoring.category_detail(pages, kpis, meta, "Materials")
+
+
+def test_rescoring_without_edits_reproduces_a_rolled_up_pillar():
+    """The editor allows KPI edits only when rescoring reproduces the stored pillar. Rescoring
+    as a flat average stopped matching once pillars were scored by the methodology roll-up,
+    and every KPI score on every report was locked (user, 2026-10-01)."""
+    from app.esg import scoring
+    detail = _rolled_up_detail()
+    assert "weighting" in detail
+    assert scoring.rescore_category(detail, {})["score"] == detail["score"]
+
+
+def test_an_edited_kpi_is_rescored_by_the_same_roll_up_and_keeps_its_weights():
+    from app.esg import scoring
+    detail = _rolled_up_detail()
+    edited = scoring.rescore_category(detail, {"Waste policy": 80})
+    assert edited["score"] > detail["score"]
+    row = next(r for r in edited["kpis"] if r["kpi"] == "Waste policy")
+    assert row["score"] == 80 and row["theme"] == "Waste" and "materiality" in row
+    # Rescoring the edited detail again is stable: a second save does not drift.
+    assert scoring.rescore_category(edited, {})["score"] == edited["score"]
