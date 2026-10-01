@@ -173,10 +173,14 @@ def build_facts(kind: str, doc: dict) -> dict:
         overall = float(final.get("composite_score") or 0)
         weights = scoring.weights_for(final)
         weights_text = scoring.weights_label(weights)
-        company = doc.get("company_name") or "—"
+        # The company name and financial year an analyst corrected on any report: they are
+        # edit fields rather than part of `final`, so they are read here or the summary would
+        # keep the old ones while the other two reports showed the new (user, 2026-10-02).
+        edited = (doc.get("report_edits") or {}).get("fields") or {}
+        company = edited.get("company") or doc.get("company_name") or "—"
         identifier = "Not provided"
         sector = final.get("sector") or "—"
-        period = doc.get("report_year") or "—"
+        period = edited.get("fy") or doc.get("report_year") or "—"
         assessed = doc.get("analyzed_at") or final.get("report_date")
         year = doc.get("year_score") or {}
         diff = year.get("difference")

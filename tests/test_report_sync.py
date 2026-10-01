@@ -71,3 +71,20 @@ def test_one_kpi_edit_reaches_every_report(admin_client, db, fake_ai):
     data = admin_client.get(base + "/summary").content
     cells = [c.text for t in docx.Document(io.BytesIO(data)).tables for r in t.rows for c in r.cells]
     assert any(a == "Waste policy" and b == "80" for a, b in zip(cells, cells[1:]))
+
+
+def test_a_company_name_or_year_corrected_on_one_report_reaches_the_summary(admin_client, db, fake_ai):
+    """They are edit fields, not part of the stored result, so the summary reads them too --
+    or it kept the old name while the other two reports showed the new (user, 2026-10-02)."""
+    sid = _rolled_up(db)
+    base = f"/api/admin/esg/submissions/{sid}"
+    assert admin_client.put(base + "/report/edits", json={
+        "fields": {"company": "Acme Holdings PLC", "fy": "2024-2025", "sector": "Capital Goods"},
+    }).status_code == 200
+    facts = admin_client.get(base + "/report").json()["summary"]
+    assert facts["company"] == "Acme Holdings PLC"
+    assert facts["period"] == "2024-2025"
+    assert facts["sector"] == "Capital Goods"
+    data = admin_client.get(base + "/summary").content
+    text = "\n".join(c.text for t in docx.Document(io.BytesIO(data)).tables for r in t.rows for c in r.cells)
+    assert "Acme Holdings PLC" in text and "2024-2025" in text and "Capital Goods" in text
