@@ -607,6 +607,36 @@ def _require(answer, fields: tuple, what: str) -> None:
     missing = [f for f in fields if not answer.get(f)]
     if missing:
         raise ValueError(f"{what}: answer left out {', '.join(missing)}")
+    if "pillar_narratives" in fields:
+        empty = [c for c in PILLAR_CODES if not _pillar_words(answer, c)]
+        if empty:
+            # Checked per pillar: an answer carrying E and S with an empty G passed the
+            # check above, was stored, and Governance showed a heading with no
+            # assessment under it for the life of the report (user, 2026-10-06).
+            raise ValueError(f"{what}: answer left the {', '.join(empty)} pillar assessment empty")
+
+
+PILLAR_CODES = ("E", "S", "G")
+# The prompt asks for AT LEAST 300 words per pillar (LENGTH above). An answer is asked
+# again when any pillar falls well short of that -- under two-thirds of it.
+MIN_PILLAR_WORDS = 300
+SHORT_PILLAR_WORDS = 200
+
+
+def _pillar_words(answer: dict, code: str) -> int:
+    """Words in one pillar's assessment, whether the answer gave it as a string or a list
+    of paragraphs."""
+    pillars = answer.get("pillar_narratives") if isinstance(answer, dict) else None
+    if not isinstance(pillars, dict):
+        return 0
+    return len(_as_paragraphs(pillars.get(code)).split())
+
+
+def _short_pillars(answer: dict) -> list[str]:
+    """The pillars whose assessment falls well short of the minimum."""
+    if not isinstance((answer or {}).get("pillar_narratives"), dict):
+        return []
+    return [c for c in PILLAR_CODES if _pillar_words(answer, c) < SHORT_PILLAR_WORDS]
 
 
 def _user_payload(facts: dict) -> str:
@@ -657,17 +687,37 @@ def _ask_pass(kind: str, system: str, user: str, required: tuple, what: str) -> 
 
     A pass is four long calls' worth of work away from a finished narrative, and a single
     unreadable or incomplete answer used to discard all of it. The model is not
-    deterministic about its formatting, so asking again usually succeeds."""
-    last = None
+    deterministic, so asking again usually succeeds.
+
+    Two kinds of shortfall, treated differently:
+    - an unreadable answer, or one missing a field or a pillar's assessment, is never
+      used: the report would carry a heading with nothing under it;
+    - pillar assessments that are present but well short of the minimum are asked for
+      again, but if every attempt is short the fullest one is kept. A short assessment is
+      better than none, and refusing it would leave the report with no written text."""
+    last, best = None, None
     for attempt in range(1, PASS_ATTEMPTS + 1):
         try:
             answer = _ask_ai(kind, system, user)
             _require(answer, required, what)
-            return answer
         except Exception as e:
             last = e
             logger.warning("rating summary narrative: %s, attempt %d of %d failed: %s",
                            what, attempt, PASS_ATTEMPTS, e)
+            continue
+        short = _short_pillars(answer) if "pillar_narratives" in required else []
+        if not short:
+            return answer
+        words = {c: _pillar_words(answer, c) for c in PILLAR_CODES}
+        logger.warning("rating summary narrative: %s, attempt %d of %d: pillar assessment "
+                       "too short (%s words; at least %d asked for)", what, attempt,
+                       PASS_ATTEMPTS, ", ".join(f"{c} {words[c]}" for c in PILLAR_CODES),
+                       MIN_PILLAR_WORDS)
+        rank = (-len(short), sum(words.values()))
+        if best is None or rank > best[0]:
+            best = (rank, answer)
+    if best is not None:
+        return best[1]
     raise last
 
 

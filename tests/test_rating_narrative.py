@@ -505,3 +505,78 @@ def test_a_pass_that_never_answers_gives_up_after_three_tries(monkeypatch):
     with pytest.raises(ValueError):
         summary._ask_pass("esg", "s", "u", ("strengths",), "drivers")
     assert len(calls) == summary.PASS_ATTEMPTS
+
+
+# --- every pillar gets its assessment, and a long enough one -------------------------------
+
+def _pass_answers(monkeypatch, *answers):
+    calls = []
+    queue = list(answers)
+
+    def fake(kind, system, user):
+        calls.append(1)
+        return queue.pop(0)
+
+    monkeypatch.setattr(summary, "_ask_ai", fake)
+    return calls
+
+
+def _pillars(e, s, g):
+    return {"executive_summary": "x", "pillar_narratives": {"E": e, "S": s, "G": g}}
+
+
+FIRST_PASS = ("executive_summary", "pillar_narratives")
+LONG = "word " * 320
+
+
+def test_an_empty_pillar_assessment_is_asked_again(monkeypatch):
+    """Seen live: E and S written, G empty, and the empty one stored for the life of the
+    report (user, 2026-10-06)."""
+    calls = _pass_answers(monkeypatch, _pillars("e", "s", ""), _pillars("e", "s", "g"))
+    answer = summary._ask_pass("esg", "sys", "u", FIRST_PASS, "pillars")
+    assert answer["pillar_narratives"]["G"] == "g" and len(calls) == 2
+
+
+def test_a_missing_pillar_is_asked_again_too(monkeypatch):
+    calls = _pass_answers(monkeypatch,
+                          {"executive_summary": "x", "pillar_narratives": {"E": "e", "S": "s"}},
+                          _pillars("e", "s", "g"))
+    summary._ask_pass("esg", "sys", "u", FIRST_PASS, "pillars")
+    assert len(calls) == 2
+
+
+def test_an_empty_pillar_on_every_attempt_fails_rather_than_storing_a_gap(monkeypatch):
+    _pass_answers(monkeypatch, *[_pillars("e", "s", "")] * summary.PASS_ATTEMPTS)
+    with pytest.raises(ValueError, match="G pillar"):
+        summary._ask_pass("esg", "sys", "u", FIRST_PASS, "pillars")
+
+
+def test_a_short_pillar_assessment_is_asked_again(monkeypatch):
+    monkeypatch.setattr(summary, "SHORT_PILLAR_WORDS", 200)
+    calls = _pass_answers(monkeypatch, _pillars(LONG, "too short", LONG), _pillars(LONG, LONG, LONG))
+    answer = summary._ask_pass("esg", "sys", "u", FIRST_PASS, "pillars")
+    assert summary._pillar_words(answer, "S") >= 300 and len(calls) == 2
+
+
+def test_when_every_attempt_is_short_the_fullest_is_kept(monkeypatch):
+    """A short assessment is better than none: refusing it would leave the report with no
+    written text at all."""
+    monkeypatch.setattr(summary, "SHORT_PILLAR_WORDS", 200)
+    medium = "word " * 150
+    calls = _pass_answers(monkeypatch, _pillars("a", "b", "c"),
+                          _pillars(medium, medium, medium), _pillars("a b", "c d", "e f"))
+    answer = summary._ask_pass("esg", "sys", "u", FIRST_PASS, "pillars")
+    assert summary._pillar_words(answer, "E") == 150 and len(calls) == summary.PASS_ATTEMPTS
+
+
+def test_paragraph_lists_are_counted_as_words(monkeypatch):
+    monkeypatch.setattr(summary, "SHORT_PILLAR_WORDS", 200)
+    answer = _pillars(["word " * 120, "word " * 120], LONG, LONG)
+    assert summary._pillar_words(answer, "E") == 240 and summary._short_pillars(answer) == []
+
+
+def test_the_other_passes_are_not_held_to_the_pillar_length(monkeypatch):
+    monkeypatch.setattr(summary, "SHORT_PILLAR_WORDS", 200)
+    calls = _pass_answers(monkeypatch, {"strengths": ["short"]})
+    summary._ask_pass("esg", "sys", "u", ("strengths",), "strengths")
+    assert len(calls) == 1

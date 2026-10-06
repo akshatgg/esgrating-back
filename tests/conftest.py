@@ -99,3 +99,13 @@ class FakeLLM:
 def prompts(db):
     for cat in ("Environment", "Social", "Governance"):
         db.esg_prompts.insert_one({"category": cat, "prompt": f"[{cat}] score this: {{text}}"})
+
+
+@pytest.fixture(autouse=True)
+def short_pillar_text_is_fine(monkeypatch):
+    """The fake AIs answer with one-line pillar assessments ("E story"). The narrative asks
+    again when an assessment is well short of 300 words, which would triple their calls and
+    break every test that counts them. The length rule is tested on its own in
+    tests/test_rating_narrative.py, which sets the threshold back."""
+    from app.reports import summary
+    monkeypatch.setattr(summary, "SHORT_PILLAR_WORDS", 0)
