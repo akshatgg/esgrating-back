@@ -19,6 +19,17 @@ ATTENTION_LIMIT = 10
 STALE_AFTER = timedelta(hours=24)
 
 
+# The fields each card shows, and nothing else. A submission carries its page scores, KPI
+# tables, written text and a copy of the original report -- up to ~550 KB -- and reading
+# the five newest whole took 23 of the Dashboard's 24 seconds on the throttled production
+# database (user, 2026-10-08).
+_ESG_RECENT = {"company_name": 1, "name": 1, "created_at": 1, "status": 1, "analysis_status": 1,
+               "final.composite_score": 1, "final.composite_score_performance": 1}
+_BFSI_RECENT = {"borrower_name": 1, "industry": 1, "loan_type": 1, "created_at": 1, "status": 1,
+                "analysis_status": 1, "overall_score": 1, "grade": 1}
+_ATTENTION = ("created_at", "analysis_error")
+
+
 def _iso(dt):
     return dt.isoformat() if isinstance(dt, datetime) else dt
 
@@ -88,7 +99,7 @@ def _daily_series(esg_col, bfsi_col) -> list:
 
 def _recent_esg(col) -> list:
     items = []
-    for d in col.find().sort("_id", -1).limit(RECENT_LIMIT):
+    for d in col.find({}, _ESG_RECENT).sort("_id", -1).limit(RECENT_LIMIT):
         final = d.get("final") or {}
         score = final.get("composite_score")
         items.append({
@@ -106,7 +117,7 @@ def _recent_esg(col) -> list:
 
 def _recent_bfsi(col) -> list:
     items = []
-    for d in col.find().sort("_id", -1).limit(RECENT_LIMIT):
+    for d in col.find({}, _BFSI_RECENT).sort("_id", -1).limit(RECENT_LIMIT):
         industry = d.get("industry")
         label = (INDUSTRIES.get(industry) or {}).get("label") if industry else None
         score = d.get("overall_score")
@@ -139,7 +150,8 @@ def _recent_messages(col) -> list:
 
 def _attention_rows(col, kind: str, title_field: str, cutoff: datetime) -> list:
     rows = []
-    for d in col.find({"analysis_status": "failed"}).sort("_id", -1).limit(ATTENTION_LIMIT):
+    fields = dict.fromkeys((title_field, *_ATTENTION), 1)
+    for d in col.find({"analysis_status": "failed"}, fields).sort("_id", -1).limit(ATTENTION_LIMIT):
         rows.append((d.get("created_at"), {
             "kind": kind,
             "id": str(d["_id"]),
@@ -153,7 +165,7 @@ def _attention_rows(col, kind: str, title_field: str, cutoff: datetime) -> list:
         "analysis_status": {"$in": ["idle", None]},
         "created_at": {"$lt": cutoff},
     }
-    for d in col.find(stale_query).sort("_id", -1).limit(ATTENTION_LIMIT):
+    for d in col.find(stale_query, fields).sort("_id", -1).limit(ATTENTION_LIMIT):
         rows.append((d.get("created_at"), {
             "kind": kind,
             "id": str(d["_id"]),
