@@ -5,7 +5,7 @@
 # app/ratings/store.py + app/ratings/router.py (rating shape/search).
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -82,30 +82,63 @@ def rating_item(doc: dict) -> dict:
     }
 
 
-def _calc_docs(search: str) -> list[dict]:
-    query = {}
-    if search:
-        rx = {"$regex": re.escape(search), "$options": "i"}
-        query = {
-            "$or": [
-                {"company_name": rx},
-                {"name": rx},
-                {"email": rx},
-                {"final.sector": rx},
-                {"final.composite_score_performance": rx},
-                {"final.composite_score_performance_label": rx},
-            ]
-        }
-    return list(esg_submissions_collection().find(query))
+# What _calc_item, _calc_status and rating_item read, and nothing else. A submission
+# carries its page scores, KPI tables, written text and a copy of the original report -- up
+# to ~550 KB -- and this list read every one of them whole, twice per page load, on a
+# database throttled to ~100 KB/s (user, 2026-10-08).
+_CALC_FIELDS = {"company_name": 1, "name": 1, "email": 1, "report_year": 1, "created_at": 1,
+                "status": 1, "analysis_status": 1, "final.sector": 1, "final.composite_score": 1,
+                "final.composite_score_performance": 1, "final.composite_score_performance_label": 1}
+_RATING_FIELDS = {"s_no": 1, "company_name": 1, "sector": 1, "esg_rating": 1, "grade": 1,
+                  "category": 1, "date_of_rating": 1}
 
 
-def _rating_docs(search: str) -> list[dict]:
-    # No-search path: one plain find(), no separate count + re-fetch.
+def _calc_query(search: str) -> dict:
     if not search:
-        return list(ratings_collection().find({}))
-    pattern = re.compile(re.escape(search), re.IGNORECASE)
-    docs = list(ratings_collection().find({}))
-    return [d for d in docs if any(pattern.search(str(d.get(f, ""))) for f in _RATING_SEARCH_FIELDS)]
+        return {}
+    rx = {"$regex": re.escape(search), "$options": "i"}
+    return {
+        "$or": [
+            {"company_name": rx},
+            {"name": rx},
+            {"email": rx},
+            {"final.sector": rx},
+            {"final.composite_score_performance": rx},
+            {"final.composite_score_performance_label": rx},
+        ]
+    }
+
+
+def _rating_query(search: str) -> dict:
+    if not search:
+        return {}
+    rx = {"$regex": re.escape(search), "$options": "i"}
+    return {"$or": [{f: rx} for f in _RATING_SEARCH_FIELDS]}
+
+
+def _newest_calc(query: dict, n: int) -> list[dict]:
+    """At least the n submissions that come first in the list.
+
+    The list orders a day's submissions by id, the database orders them by time, and the
+    two disagree for submissions imported with their original dates. So the whole of the
+    last day reached is read as well: then no submission that belongs before the cut is
+    left out, and _sort_key puts them in the list's own order."""
+    col = esg_submissions_collection()
+    docs = list(col.find(query, _CALC_FIELDS).sort([("created_at", -1), ("_id", -1)]).limit(n))
+    last = docs[-1].get("created_at") if len(docs) == n else None
+    if isinstance(last, datetime):
+        day = datetime(last.year, last.month, last.day, tzinfo=last.tzinfo)
+        same_day = {"created_at": {"$gte": day, "$lt": day + timedelta(days=1)},
+                    "_id": {"$nin": [d["_id"] for d in docs]}}
+        docs += list(col.find({"$and": [query, same_day]} if query else same_day, _CALC_FIELDS))
+    return docs
+
+
+def _newest_ratings(query: dict, n: int) -> list[dict]:
+    """The n rated companies that come first in the list: newest rating date, then highest
+    s_no -- the order _sort_key gives them, done by the database."""
+    return list(ratings_collection().find(query, _RATING_FIELDS)
+                .sort([("date_of_rating", -1), ("s_no", -1)]).limit(n))
 
 
 def _sort_key(entry: tuple[str, dict]):
@@ -119,21 +152,29 @@ def _sort_key(entry: tuple[str, dict]):
 
 @router.get("/combined")
 def combined_list(search: str = "", page: int = 1, source: str = "all", admin: str = Depends(require_admin)):
+    """One page of the merged list, paged in the database: the totals are counted there,
+    and only the first page*PAGE_SIZE records of each kind are read -- the page can only
+    hold records from those -- then merged and cut to the page."""
     if source not in VALID_SOURCES:
         raise HTTPException(422, f"Invalid source '{source}'; expected one of: all, calculator, rating.")
 
     search = search.strip()
     page = max(page, 1)
+    needed = page * PAGE_SIZE
 
     items: list[dict] = []
+    total = 0
     if source in ("all", "calculator"):
-        items.extend(_calc_item(d) for d in _calc_docs(search))
+        query = _calc_query(search)
+        total += esg_submissions_collection().count_documents(query)
+        items.extend(_calc_item(d) for d in _newest_calc(query, needed))
     if source in ("all", "rating"):
-        items.extend(rating_item(d) for d in _rating_docs(search))
+        query = _rating_query(search)
+        total += ratings_collection().count_documents(query)
+        items.extend(rating_item(d) for d in _newest_ratings(query, needed))
 
     items.sort(key=lambda item: _sort_key((item["date"], item)), reverse=True)
 
-    total = len(items)
     pages = math.ceil(total / PAGE_SIZE) if total else 0
     start = (page - 1) * PAGE_SIZE
     page_items = items[start:start + PAGE_SIZE]
