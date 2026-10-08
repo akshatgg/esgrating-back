@@ -502,10 +502,11 @@ def rescore_category(detail: dict, scores: dict[str, float]) -> dict:
     rows = []
     for r in detail.get("kpis") or []:
         # An analyst's own number replaces the AI's and is never capped again; an untouched
-        # row keeps the cap it was scored with.
+        # row keeps the cap it was scored with. Every row keeps its evidence: an edit
+        # changes the score, not what the report showed or the page it showed it on, and
+        # the reason and page reference stay in every report (user, 2026-10-08).
         row = kpi_row(r["kpi"], scores.get(r["kpi"], kpi_best(r)), r.get("pages") or [],
-                      bool(r.get("capped")) and r["kpi"] not in scores,
-                      None if r["kpi"] in scores else r.get("evidence"))
+                      bool(r.get("capped")) and r["kpi"] not in scores, r.get("evidence"))
         for field in _ROLLUP_FIELDS:
             if field in r:
                 row[field] = r[field]
