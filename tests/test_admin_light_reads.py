@@ -224,3 +224,83 @@ def test_the_first_page_reads_one_page_of_each_kind_not_everything(admin_client,
     body = admin_client.get("/api/admin/esg/combined").json()
     assert body["total"] == 40 and len(body["items"]) == 3
     assert ratings.read == 3 and subs.read == 3
+
+
+# --- the report editor reads one run, and only its page scores -----------------------------
+
+import json  # noqa: E402
+
+from app.esg import store as esg_store  # noqa: E402
+from tests.test_esg_routes import _seed_submission  # noqa: E402
+
+
+def _runs(db, cid):
+    """Two analysis runs of one report. A run carries every page's text and KPI detail --
+    ~5.5 MB on production -- of which the report editor uses four fields per page."""
+    def run(composite, score, reason):
+        return {"company_id": cid, "filename": ["report.pdf"], "composite_score": composite, "analysis": [
+            {"filename": "report.pdf", "category": "Environment", "page_no": 3, "text": BIG, "kpis": [BIG],
+             "printed_no": 1, "analysis": json.dumps({"reason": reason, "score": score})},
+            {"filename": "report.pdf", "category": "Social", "page_no": 4, "text": BIG, "kpis": [BIG],
+             "page_score": 70, "analysis": json.dumps({"reason": f"{reason} S", "score": 10})},
+        ]}
+    db.esg_report.insert_one(run(40.0, 80, "matched run"))
+    db.esg_report.insert_one(run(60.0, 20, "newest run"))
+
+
+def _report_sub(db, cid):
+    return _seed_submission(db, company_id=cid, original_filename="report.pdf", final={
+        "composite_score": 40.0, "environmental_score": 80.0, "social_score": 70.0, "governance_score": 0.0})
+
+
+def test_the_editor_shows_the_page_scores_of_the_run_behind_the_report(admin_client, db):
+    cid = ObjectId()
+    _runs(db, cid)
+    sid = _report_sub(db, cid)
+
+    pages = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["pages"]
+    assert pages["E"] == [{"page": 3, "score": 80.0, "original_score": 80.0, "reason": "matched run"}]
+    assert pages["S"] == [{"page": 4, "score": 70.0, "original_score": 70.0, "reason": "matched run S"}]
+
+
+class _RunSpy:
+    def __init__(self, col):
+        self._col, self.finds, self.find_ones = col, [], []
+
+    def find(self, *args, **kwargs):
+        self.finds.append(args[1] if len(args) > 1 else kwargs.get("projection"))
+        return self._col.find(*args, **kwargs)
+
+    def find_one(self, *args, **kwargs):
+        self.find_ones.append(args[1] if len(args) > 1 else kwargs.get("projection"))
+        return self._col.find_one(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._col, name)
+
+
+def test_the_editor_reads_no_page_text_or_kpi_detail(admin_client, db, monkeypatch):
+    cid = ObjectId()
+    _runs(db, cid)
+    sid = _report_sub(db, cid)
+    spy = _RunSpy(db.esg_report)
+    monkeypatch.setattr(esg_store, "esg_collection", lambda: spy)
+
+    assert admin_client.get(f"/api/admin/esg/submissions/{sid}/report").status_code == 200
+    # Candidate runs are compared on their composite alone ...
+    assert [set(p) - {"_id"} for p in spy.finds] == [{"composite_score"}]
+    # ... and only the chosen one is read, without its page text or KPI detail.
+    assert len(spy.find_ones) == 1
+    projection = spy.find_ones[0]
+    assert projection and not {"analysis.text", "analysis.kpis"} & set(projection)
+    assert "analysis" not in projection and "analysis.analysis" in projection
+
+
+def test_the_csv_export_still_reads_the_whole_run_behind_the_report(admin_client, db):
+    cid = ObjectId()
+    _runs(db, cid)
+    sid = _report_sub(db, cid)
+
+    body = admin_client.get(f"/api/admin/esg/export_csv/{cid}?submission_id={sid}").text
+    assert "matched run" in body and "newest run" not in body
+    assert BIG[:100] in body  # the page text column

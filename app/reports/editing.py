@@ -462,21 +462,31 @@ def restore_update(kind: str, original: dict) -> dict:
     }
 
 
-def _esg_report_doc(doc: dict, base_final: dict) -> dict | None:
+# What _pages reads of each page record. A run also holds every page's text and KPI detail
+# -- ~5.5 MB for a 400-page report -- which the editor never shows.
+_PAGE_FIELDS = {"analysis.category": 1, "analysis.page_no": 1, "analysis.analysis": 1, "analysis.page_score": 1}
+
+
+def _esg_report_doc(doc: dict, base_final: dict, fields: dict | None = None) -> dict | None:
     """The esg_report run behind this submission: latest for its company + file, preferring
-    the one whose stored composite matches the report being edited."""
+    the one whose stored composite matches the report being edited.
+
+    The candidates are compared on their composite alone, and only the chosen run is read
+    -- with just `fields` where given. Reading up to 20 runs whole kept the report editor
+    waiting two minutes on production (user, 2026-10-08)."""
     cid = doc.get("company_id")
     if not cid:
         return None
     query = {"company_id": cid}
     if doc.get("original_filename"):
         query["filename"] = doc["original_filename"]
-    runs = list(esg_store.esg_collection().find(query).sort("_id", -1).limit(20))
+    col = esg_store.esg_collection()
+    runs = list(col.find(query, {"composite_score": 1}).sort("_id", -1).limit(20))
+    if not runs:
+        return None
     target = base_final.get("composite_score")
-    for run in runs:
-        if run.get("composite_score") == target:
-            return run
-    return runs[0] if runs else None
+    chosen = next((run for run in runs if run.get("composite_score") == target), runs[0])
+    return col.find_one({"_id": chosen["_id"]}, fields)
 
 
 def _esg_page(record: dict) -> tuple:
@@ -510,7 +520,7 @@ def _pages(kind: str, doc: dict, base: dict) -> dict:
     """Per category, in the stored (= averaging) order: [{page, score, reason, idx}]."""
     pages = {c: [] for c in CATS}
     if kind == "esg":
-        run = _esg_report_doc(doc, base)
+        run = _esg_report_doc(doc, base, _PAGE_FIELDS)
         records = (run or {}).get("analysis") or []
         by_name = {v: k for k, v in ESG_CATEGORY.items()}
         for idx, rec in enumerate(records):
