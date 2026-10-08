@@ -12,7 +12,7 @@ from app.auth.deps import require_admin
 from app.bfsi import store as bfsi_store
 from app.core.uploads import read_limited
 from app.esg.submissions import esg_submissions_collection, serialize_doc
-from app.reports import editing, summary
+from app.reports import editing, rewrite, summary
 from app.reports.logo import MAX_LOGO_BYTES, delete_logo_file, logo_media_type, logo_path, save_logo
 
 router = APIRouter(prefix="/api/admin", tags=["admin-reports"])
@@ -25,7 +25,7 @@ _ID_RE = re.compile(r"^[0-9a-f]{24}$", re.IGNORECASE)
 
 # The report_edits sub-fields a PUT owns. It sets (or unsets) exactly these, never the
 # whole report_edits object, so a logo uploaded while the PUT was in flight survives.
-_CONTENT_KEYS = ("headings", "fields", "page_scores", "kpi_scores", "pillar_overrides")
+_CONTENT_KEYS = ("headings", "fields", "page_scores", "kpi_scores", "pillar_overrides", "ai_reasons")
 
 
 def _collection(kind: str):
@@ -174,6 +174,8 @@ def preview_report(kind: str, id: str, payload: dict = Depends(edits_body),
     _col, doc = _load(kind, id)
     ctx = editing.load_context(kind, doc)
     edits = editing.normalize_edits(kind, payload, ctx)
+    # Reasons already rewritten for a saved score show; a preview never asks the AI.
+    edits["ai_reasons"] = editing.stored_edits(doc)["ai_reasons"]
     result = editing.compute(kind, doc, ctx, edits, _logo_url(kind, doc),
                              _logo_url(kind, doc, "corner"))
     return serialize_doc({
@@ -195,6 +197,10 @@ def save_edits(kind: str, id: str, payload: dict = Depends(edits_body),
     meta = {"report_edits.updated_at": datetime.now(timezone.utc), "report_edits.updated_by": admin}
 
     if editing.edits_have_content(edits):
+        # An edited KPI score gets its reason rewritten to fit (user, 2026-10-09); one AI
+        # call per KPI changed, reused while the score stands.
+        edits["ai_reasons"] = rewrite.reasons_for(kind, doc, ctx["base"], edits,
+                                                  editing.stored_edits(doc)["ai_reasons"])
         stored = editing.compute(kind, doc, ctx, edits)["stored"]
         update = {"$set": {**stored, **meta, **{f"report_edits.{k}": edits[k] for k in _CONTENT_KEYS}}}
         if not doc.get("report_original"):
