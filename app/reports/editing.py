@@ -223,6 +223,9 @@ def empty_edits() -> dict:
         "page_scores": {c: {} for c in CATS},
         "kpi_scores": {c: {} for c in CATS},
         "pillar_overrides": {c: None for c in CATS},
+        # Reasons the AI rewrote for edited KPI scores (app/reports/rewrite.py): set by the
+        # server on save, never taken from the client.
+        "ai_reasons": {c: {} for c in CATS},
         "logo": None,
         "corner_logo": None,
     }
@@ -231,7 +234,7 @@ def empty_edits() -> dict:
 # Keys of the body besides the edits proper: ignored (the web may send back the edits
 # object it got from GET). The logo is only ever changed through the logo routes, so a
 # stale edits object can never undo an upload.
-_IGNORED_BODY_KEYS = {"logo", "corner_logo", "updated_at", "updated_by"}
+_IGNORED_BODY_KEYS = {"logo", "corner_logo", "updated_at", "updated_by", "ai_reasons"}
 
 
 def normalize_edits(kind: str, payload, ctx: dict) -> dict:
@@ -427,6 +430,7 @@ def stored_edits(doc: dict) -> dict:
         out["page_scores"][c] = dict((raw.get("page_scores") or {}).get(c) or {})
         out["kpi_scores"][c] = dict((raw.get("kpi_scores") or {}).get(c) or {})
         out["pillar_overrides"][c] = (raw.get("pillar_overrides") or {}).get(c)
+        out["ai_reasons"][c] = copy.deepcopy((raw.get("ai_reasons") or {}).get(c) or {})
     out["logo"] = raw.get("logo")
     out["corner_logo"] = raw.get("corner_logo")
     out["updated_at"] = raw.get("updated_at")
@@ -669,6 +673,27 @@ def _effective_kpis(ctx: dict, edits: dict) -> dict:
     }
 
 
+def _apply_kpi_reasons(coverage: dict, edits: dict) -> None:
+    """A KPI's reason on the report itself -- so the PDF, the Word summary and the writer
+    all read the same text: the analyst's own where they typed one (user, 2026-09-23),
+    else the one the AI rewrote for the score they set (app/reports/rewrite.py, while that
+    score stands), else the scoring call's."""
+    own = edits["fields"].get("kpi_reasons") or {}
+    written = edits.get("ai_reasons") or {}
+    for cat in CATS:
+        for row in (coverage.get(ESG_CATEGORY[cat]) or {}).get("kpis") or []:
+            text = (own.get(cat) or {}).get(row.get("kpi"))
+            if not text:
+                ai = (written.get(cat) or {}).get(row.get("kpi"))
+                if isinstance(ai, dict) and _same(ai.get("score"), row.get("score")):
+                    text = ai.get("reason")
+            if text:
+                evidence = dict(row.get("evidence") or {})
+                evidence["reason"] = text
+                evidence.pop("also", None)  # the supporting pages explained the old text
+                row["evidence"] = evidence
+
+
 def _pillar(cat: str, rows: list, edits: dict, original_score, average):
     """Spec step 3: override > recomputed page average (only if a page was edited) > stored."""
     override = edits["pillar_overrides"][cat]
@@ -716,18 +741,7 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             # the detailed report, CSV and summary all show the same pillar score.
             for cat in CATS:
                 esg_scoring.mark_pillar(final["kpi_coverage"].get(ESG_CATEGORY[cat]), final[f"{ESG_PREFIX[cat]}_score"])
-            # A Reason corrected by an analyst replaces the one the scoring call wrote, on
-            # the report itself -- so the PDF, the Word summary and the writer all read the
-            # corrected text rather than the original (user, 2026-09-23).
-            for cat, texts in (fields.get("kpi_reasons") or {}).items():
-                rows = (final["kpi_coverage"].get(ESG_CATEGORY[cat]) or {}).get("kpis") or []
-                for row in rows:
-                    text = texts.get(row.get("kpi"))
-                    if text:
-                        evidence = dict(row.get("evidence") or {})
-                        evidence["reason"] = text
-                        evidence.pop("also", None)  # the supporting pages explained the old text
-                        row["evidence"] = evidence
+            _apply_kpi_reasons(final["kpi_coverage"], edits)
         # The marks an analyst allotted each pillar, stored on the report as the table
         # shows them, so the overall score, the CSV, the Word summary and the writer all
         # read the same ones through weights_for() (user, 2026-09-22).
@@ -785,6 +799,8 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             ai[key] = scores[cat]
         if isinstance(ai.get("kpi_coverage"), dict):
             esg_scoring.mark_pillar(ai["kpi_coverage"].get(ESG_CATEGORY[cat]), scores[cat])
+    if isinstance(ai.get("kpi_coverage"), dict):
+        _apply_kpi_reasons(ai["kpi_coverage"], edits)
     reasons = ai.get("reasons")
     for cat in CATS:
         for r in eff_pages[cat]:

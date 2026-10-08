@@ -271,9 +271,15 @@ def build_facts(kind: str, doc: dict) -> dict:
             # "Key evidence / factor": what the scoring call said about this KPI, which is
             # the column's whole point. A KPI the report never addressed has no evidence to
             # show, so it says so rather than leaving the cell blank.
-            reason = str((r.get("evidence") or {}).get("reason") or "").strip()
-            driver = reason or ("Not addressed in the report" if r["score"] == 0
-                                else _pages(r["pages"], page_numbers))
+            ev = r.get("evidence") or {}
+            reason = str(ev.get("reason") or "").strip()
+            if reason:
+                # The reason and its page together, always: an edited score keeps its page
+                # reference beside its rewritten reason (user, 2026-10-09).
+                driver = f"{reason} ({_cite(ev['page'], page_numbers)})" if ev.get("page") is not None else reason
+            else:
+                driver = ("Not addressed in the report" if r["score"] == 0 or not r["pages"]
+                          else _pages(r["pages"], page_numbers))
             kpi_rows.append({**r, "pillar": name, "driver": driver})
         total += len(rows)
         found += len(strong)
