@@ -692,9 +692,12 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
             if edits["kpi_scores"][cat]:
                 # Edited KPI scores: the KPI Assessment shows them and, unless the pillar
                 # is set by hand, the pillar is their category score.
+                # Only the KPIs the analyst changed: every other row is rescored as the
+                # analysis left it, cap and evidence included. Passing the whole pillar
+                # marked every row as edited and stripped all of them of their evidence
+                # (user, 2026-10-08).
                 name = ESG_CATEGORY[cat]
-                detail = esg_scoring.rescore_category(
-                    final["kpi_coverage"][name], {r["kpi"]: r["score"] for r in eff_kpis[cat]})
+                detail = esg_scoring.rescore_category(final["kpi_coverage"][name], edits["kpi_scores"][cat])
                 final["kpi_coverage"][name] = detail
                 if edits["pillar_overrides"][cat] is None:
                     final[key] = detail["score"]
@@ -762,9 +765,9 @@ def compute(kind: str, doc: dict, ctx: dict, edits: dict, logo_url: str | None =
         if edits["kpi_scores"][cat]:
             # Edited KPI scores: the KPI Assessment shows them and, unless the pillar is
             # set by hand, the pillar is their category score.
+            # Only the KPIs the analyst changed, as for ESG above.
             name = ESG_CATEGORY[cat]
-            detail = esg_scoring.rescore_category(
-                ai["kpi_coverage"][name], {r["kpi"]: r["score"] for r in eff_kpis[cat]})
+            detail = esg_scoring.rescore_category(ai["kpi_coverage"][name], edits["kpi_scores"][cat])
             ai["kpi_coverage"][name] = detail
             if edits["pillar_overrides"][cat] is None:
                 scores[cat] = float(detail["score"])

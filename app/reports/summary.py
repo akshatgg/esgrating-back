@@ -661,21 +661,190 @@ def _fingerprint(user: str) -> str:
     return hashlib.sha256(f"v{NARRATIVE_VERSION}\n{stable}".encode()).hexdigest()
 
 
+# --- An edited score leaves the written text alone (user, 2026-10-08) -------------------------
+#
+# The text is written once, for the rating as analysed. An analyst who then raises a KPI or a
+# pillar changes a score, not the evidence: every word, every reason and every page reference
+# stays as written, and only the scores quoted in it -- KPI, pillar and overall -- follow the
+# edit. It used to be rewritten whole on any score change (user, 2026-09-21), which gave
+# different content each time, and the rewrite was made from KPI rows the edit had stripped
+# of their evidence, so the new text cited no page at all.
+
+def _as_analysed(kind: str, doc: dict) -> dict:
+    """The submission as the analysis left it, before any analyst edit. report_original
+    holds that result once an edit is saved (app/reports/router.py save_edits); a new
+    analysis clears both, so the text then follows the new result."""
+    original = doc.get("report_original")
+    if not original:
+        return doc
+    base = {k: v for k, v in doc.items() if k != "report_edits"}
+    if kind == "esg":
+        return {**base, "final": original}
+    from app.reports.editing import BFSI_SNAPSHOT_KEYS
+    return {**{k: v for k, v in base.items() if k not in BFSI_SNAPSHOT_KEYS}, **original}
+
+
+def _analysed_fingerprint(kind: str, doc: dict) -> str:
+    """What stored text is tied to: the rating as analysed, so no edit makes it stale."""
+    return _fingerprint(_user_payload(build_facts(kind, _as_analysed(kind, doc))))
+
+
+def _scores(facts: dict) -> dict:
+    """The scores a text was written for, stored beside it so a later edit is restated from
+    the figures the text actually quotes. KPIs as [pillar, name, score] rows: a KPI name
+    can hold a dot, which a MongoDB key cannot."""
+    return {"overall": facts["overall"],
+            "pillars": {c: p["score"] for c, p in facts["pillars"].items()},
+            "kpis": [[c, r["kpi"], r["score"]] for c, p in facts["pillars"].items() for r in p["rows"]]}
+
+
+def _score_change(old, new) -> dict | None:
+    """A pillar or overall score that moved: its figure and the grade letter beside it."""
+    if not isinstance(old, (int, float)) or abs(float(old) - float(new)) < 0.005:
+        return None
+    return {"old": float(old), "new": float(new), "old_grade": _grade(old)[0], "new_grade": _grade(new)[0]}
+
+
+def _kpi_change(name: str, old, new) -> dict | None:
+    """A KPI score that moved. Restated only where the text writes it as "Name (80)"."""
+    change = _score_change(old, new)
+    return change and {**change, "kpi": name}
+
+
+def _figures(value: float) -> list[str]:
+    """The ways a score can be written in the text: as supplied (two decimals), trimmed, to
+    one decimal, or whole."""
+    forms = {f"{value:.2f}", _fmt(value), f"{value:.1f}"}
+    if value == int(value):
+        forms.add(str(int(value)))
+    return sorted(forms, key=len, reverse=True)
+
+
+def _figure_pattern(value: float) -> str:
+    # Not part of a longer number, and not a page reference: "p.43" is never a score.
+    return r"(?<![\w.])(?:" + "|".join(re.escape(f) for f in _figures(value)) + r")(?!\d|\.\d)"
+
+
+def _written_like(written: str, value: float) -> str:
+    """`value` to the precision the text wrote the old figure in."""
+    places = len(written.split(".")[1]) if "." in written else 0
+    if places == 1:
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+    return _fmt(value)
+
+
+_QUOTE = "[\"'\u2018\u2019\u201c\u201d]?"
+
+
+def _grade_patterns(grade: str) -> list[str]:
+    """A grade letter where the text is plainly naming a grade: "grade C", "a C grade",
+    "(C)", "rated C". The letter alone is not enough -- "C" and "A" are ordinary words."""
+    g = r"(?<![\w+])" + re.escape(grade) + r"(?![\w+])"
+    return [r"(?i:\bgrade\b)\s*(?::\s*|of\s+)?" + _QUOTE + f"(?P<g>{g})",
+            r"(?:(?P<a>\b[Aa]n?)\s+)?" + _QUOTE + f"(?P<g>{g})" + _QUOTE + r"(?:\s+|-)(?i:grade|rating)\b",
+            r"\(\s*" + f"(?P<g>{g})" + r"(?=\s*[,;)])",
+            r"(?i:\brated)\s+" + f"(?P<g>{g})"]
+
+
+def _article(article: str, word: str) -> str:
+    """"a" or "an" before the new grade: an A, a B."""
+    new = "an" if word[:1].upper() in "AEIOU" else "a"
+    return new.capitalize() if article[:1].isupper() else new
+
+
+_SENTENCE = re.compile(r"(?<=[.!?])(\s+)")
+
+
+def _restate_sentence(sentence: str, changes: list, anchors: list) -> str:
+    edits = []   # (start, end, replacement)
+    figures = []  # (position, change or None) of every pillar and overall figure quoted
+    for change in changes:
+        if "kpi" in change:
+            pattern = re.escape(change["kpi"]) + r"\s*\(\s*(?P<n>" + _figure_pattern(change["old"]) + r")\s*\)"
+            for m in re.finditer(pattern, sentence, re.IGNORECASE):
+                edits.append((m.start("n"), m.end("n"), _written_like(m.group("n"), change["new"])))
+            continue
+        for m in re.finditer(_figure_pattern(change["old"]), sentence):
+            edits.append((m.start(), m.end(), _written_like(m.group(0), change["new"])))
+            figures.append((m.start(), change))
+    for value in anchors:
+        figures.extend((m.start(), None) for m in re.finditer(_figure_pattern(value), sentence))
+    # A grade letter belongs to the score quoted nearest it, and moves only with that one.
+    for grade in {c["old_grade"] for _, c in figures if c and c["old_grade"] != c["new_grade"]}:
+        for pattern in _grade_patterns(grade):
+            for m in re.finditer(pattern, sentence):
+                owner = min(figures, key=lambda f: abs(f[0] - m.start("g")))[1]
+                if not owner or owner["old_grade"] != grade:
+                    continue
+                new = owner["new_grade"]
+                if m.groupdict().get("a"):
+                    edits.append((m.start("a"), m.end("a"), _article(m.group("a"), new)))
+                edits.append((m.start("g"), m.end("g"), new))
+    out, last = [], 0
+    for start, end, text in sorted(set(edits)):
+        if start < last:
+            continue  # two readings of the same characters: the first one stands
+        out += [sentence[last:start], text]
+        last = end
+    return "".join(out) + sentence[last:]
+
+
+def _restate(value, changes: list, anchors: tuple = ()):
+    """Written text with the scores that moved restated, and nothing else touched. All
+    replacements are made in one pass, so a score that moved onto another's old figure is
+    never moved twice."""
+    changes = [c for c in changes if c]
+    if not changes:
+        return value
+    if isinstance(value, str):
+        parts = _SENTENCE.split(value)
+        return "".join(p if i % 2 else _restate_sentence(p, changes, list(anchors)) for i, p in enumerate(parts))
+    if isinstance(value, list):
+        return [_restate(v, changes, anchors) for v in value]
+    if isinstance(value, dict):
+        return {k: _restate(v, changes, anchors) for k, v in value.items()}
+    return value
+
+
+def _as_rated(kind: str, doc: dict, cached: dict, facts: dict) -> dict:
+    """Stored text with the scores it quotes brought to the ones the report carries now."""
+    written = cached.get("scores")
+    if not isinstance(written, dict):
+        # Text stored before the scores were kept beside it was written for the rating as
+        # analysed: its fingerprint, which matched, says so.
+        written = _scores(build_facts(kind, _as_analysed(kind, doc)))
+    changes = [_score_change(written.get("overall"), facts["overall"])]
+    anchors = []
+    for code, p in facts["pillars"].items():
+        old = (written.get("pillars") or {}).get(code)
+        change = _score_change(old, p["score"])
+        changes.append(change)
+        if change is None and isinstance(old, (int, float)):
+            anchors.append(float(old))
+    if changes[0] is None and isinstance(written.get("overall"), (int, float)):
+        anchors.append(float(written["overall"]))
+    old_kpis = {(c, n): v for c, n, v in written.get("kpis") or []}
+    for code, p in facts["pillars"].items():
+        for r in p["rows"]:
+            if (code, r["kpi"]) in old_kpis:
+                changes.append(_kpi_change(r["kpi"], old_kpis[(code, r["kpi"])], r["score"]))
+    return _restate(cached["text"], changes, tuple(anchors))
+
+
 def fresh_narrative(kind: str, doc: dict) -> dict | None:
-    """The stored narrative, but only while it still describes the scores this report
-    carries now. Saving an edited pillar score rewrites `final` (app/reports/editing.py),
-    which changes the fingerprint -- and prose written for the old numbers sitting beside
-    the new ones is how a report ends up calling Environment its strongest pillar after
-    the analyst moved Social above it (user, 2026-09-21)."""
+    """The stored narrative, while it was written for this rating as analysed, with the
+    scores it quotes brought to the edited ones. None once a new analysis has replaced the
+    result it describes."""
     cached = doc.get("summary_ai") or {}
     text = cached.get("text")
     if not isinstance(text, dict) or not text:
         return None
     try:
-        current = _fingerprint(_user_payload(build_facts(kind, doc)))
-    except Exception:
+        if cached.get("fingerprint") != _analysed_fingerprint(kind, doc):
+            return None
+        return _as_rated(kind, doc, cached, build_facts(kind, doc))
+    except HTTPException:
         return None  # nothing to compare against: treat it as out of date
-    return text if cached.get("fingerprint") == current else None
 
 
 # How many times one pass is asked before the narrative is given up on.
@@ -723,10 +892,12 @@ def _ask_pass(kind: str, system: str, user: str, required: tuple, what: str) -> 
 
 def narrative(kind: str, doc: dict, facts: dict) -> dict:
     user = _user_payload(facts)
-    fingerprint = _fingerprint(user)
+    # Tied to the rating as analysed, so an analyst's edit never rewrites it; text first
+    # written after an edit is written for the edited scores it will be shown beside.
+    fingerprint = _analysed_fingerprint(kind, doc)
     cached = doc.get("summary_ai") or {}
     if cached.get("fingerprint") == fingerprint and isinstance(cached.get("text"), dict):
-        return cached["text"]
+        return _as_rated(kind, doc, cached, facts)
     try:
         text = {}
         for what, required, optional in PASSES:
@@ -740,7 +911,8 @@ def narrative(kind: str, doc: dict, facts: dict) -> dict:
         logger.error("rating summary narrative failed: %s", e)
         raise HTTPException(502, "Couldn't write the rating summary text right now. Try again in a minute.")
     _collection(kind).update_one({"_id": doc["_id"]}, {"$set": {"summary_ai": {
-        "fingerprint": fingerprint, "text": text, "generated_at": datetime.now(timezone.utc)}}})
+        "fingerprint": fingerprint, "text": text, "scores": _scores(facts),
+        "generated_at": datetime.now(timezone.utc)}}})
     return text
 
 

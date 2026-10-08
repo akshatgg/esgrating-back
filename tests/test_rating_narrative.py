@@ -248,24 +248,25 @@ def test_generate_reports_writes_the_narrative(admin_client, db, ai):
     assert db.esg_submissions.find_one({"_id": sid})["summary_ai"]["text"]
 
 
-def test_a_changed_score_makes_the_stored_text_stale(admin_client, db, ai):
-    """The complaint this exists for: raise one pillar above another and the prose written
-    for the old numbers must not still call the old pillar the strongest."""
+def test_a_changed_score_keeps_the_stored_text(admin_client, db, ai):
+    """An edited score changes the scores, not the text: it used to be rewritten whole on any
+    score change (user, 2026-09-21), and the client wants every word kept (user, 2026-10-08).
+    tests/test_kpi_edit_keeps_text.py covers the scores restated inside it."""
     sid = _esg(db)
     admin_client.post(f"/api/admin/esg/submissions/{sid}/reports")
-    assert admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()["narrative"]
+    written = len(ai)
 
     admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
                      json={"pillar_overrides": {"E": 95}})
 
     body = admin_client.get(f"/api/admin/esg/submissions/{sid}/report").json()
-    assert body["narrative"] is None
-    assert body["narrative_stale"] is True
+    assert body["narrative"]["strengths"] == NARRATIVE["strengths"]
+    assert body["narrative_stale"] is False
+    assert len(ai) == written
 
 
-def test_regenerating_writes_it_for_the_edited_scores(admin_client, db, ai):
+def test_text_first_written_after_an_edit_is_written_for_the_edited_scores(admin_client, db, ai):
     sid = _esg(db)
-    admin_client.post(f"/api/admin/esg/submissions/{sid}/reports")
     admin_client.put(f"/api/admin/esg/submissions/{sid}/report/edits",
                      json={"pillar_overrides": {"E": 95}})
 

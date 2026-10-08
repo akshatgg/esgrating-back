@@ -140,10 +140,10 @@ def _report(kind: str, doc: dict) -> dict:
         "edited": editing.is_edited(doc),
         "heading_keys": editing.HEADING_KEYS[kind],
         "field_keys": editing.FIELD_KEYS[kind],
-        # The written rating, and only while it still describes these scores: an edited
-        # pillar score makes the stored text out of date, and the report must not carry
-        # prose about numbers it no longer shows. `narrative_stale` tells the page to
-        # offer regeneration rather than silently showing nothing.
+        # The written rating, with the scores it quotes brought to the edited ones -- an
+        # edit never rewrites it (user, 2026-10-08). It goes out of date only when a new
+        # analysis replaces the result it was written for; `narrative_stale` tells the
+        # page to offer regeneration rather than silently showing nothing.
         "narrative": summary.with_edits(written, doc) if written else None,
         "narrative_stale": written is None and bool((doc.get("summary_ai") or {}).get("text")),
         # The Rating Summary report: the same facts the Word file is built from, so the
@@ -241,9 +241,10 @@ def download_summary(kind: str, id: str, admin: str = Depends(require_admin)):
 
 @router.post("/{kind}/submissions/{id}/reports")
 def generate_reports(kind: str, id: str, admin: str = Depends(require_admin)):
-    """Write the rating for the report as it stands -- including any scores the analyst
-    has changed -- so the detailed report, the Word summary and the page-scores export
-    all describe the same rating (user, 2026-09-21).
+    """Write the rating text where the report has none yet -- for the scores as they stand,
+    including any the analyst has changed -- so the detailed report, the Word summary and
+    the page-scores export all describe the same rating (user, 2026-09-21). Text already
+    written is kept: an edit restates its scores, it does not rewrite it (user, 2026-10-08).
 
     An analysis produces the scores and the one-pager; this is the step that writes the
     prose, and it is asked for rather than paid for on every submission."""
