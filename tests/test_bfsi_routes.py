@@ -152,10 +152,10 @@ def test_public_submit_missing_file(client):
 
 
 def test_public_submit_file_too_large(client):
-    big = b"%PDF" + b"0" * (20 * 1024 * 1024 + 1)
+    big = b"%PDF" + b"0" * (100 * 1024 * 1024 + 1)
     resp = client.post("/api/bfsi/submissions", data=VALID_FORM, files=_pdf_file(big))
     assert resp.status_code == 422
-    assert resp.json()["detail"] == "Report must be under 20 MB."
+    assert resp.json()["detail"] == "Report must be under 100 MB."
 
 
 def test_public_submit_disallowed_extension(client):

@@ -3,7 +3,7 @@
 # questionnaire step was never wired up) and are intentionally not ported — see
 # docs/analysis/bfsi.md §4d.
 
-MAX_UPLOAD_MB = 20
+MAX_UPLOAD_MB = 100
 
 LOAN_PURPOSES: list[str] = [
     "Capacity Expansion", "Working Capital", "Land Purchase", "Building Construction",
