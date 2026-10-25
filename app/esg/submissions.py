@@ -39,6 +39,12 @@ def esg_submissions_collection():
     return get_db()["esg_submissions"]
 
 
+def ensure_indexes() -> None:
+    # The admin ESG list's sort (esg/combined.py _newest_calc). Without it MongoDB sorts
+    # the ~200-550 KB documents in memory and fails past its 32 MB limit.
+    esg_submissions_collection().create_index([("created_at", -1), ("_id", -1)])
+
+
 def validate_esg_fields(form: dict) -> dict:
     for field in REQUIRED_FIELDS:
         if not (form.get(field) or "").strip():

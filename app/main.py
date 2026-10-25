@@ -22,6 +22,7 @@ from app.core.mail import MailError
 from app.esg.combined import router as esg_combined_router
 from app.esg.router_admin import router as esg_admin_router
 from app.esg.router_public import router as esg_public_router
+from app.esg.submissions import ensure_indexes as ensure_esg_indexes
 from app.ratings.router import admin_router as ratings_admin_router
 from app.ratings.router import public_router as ratings_public_router
 from app.ratings.store import ensure_indexes as ensure_ratings_indexes
@@ -64,6 +65,10 @@ async def lifespan(_app: FastAPI):
         ensure_blog_indexes()
     except Exception as e:
         logging.getLogger(__name__).warning("could not ensure blog indexes: %s", e)
+    try:
+        ensure_esg_indexes()
+    except Exception as e:
+        logging.getLogger(__name__).warning("could not ensure esg indexes: %s", e)
     yield
 
 
