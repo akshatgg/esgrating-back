@@ -11,6 +11,10 @@ dependencies = [
     # >=3 for openai.providers.bedrock, which is how the same OpenAI models are
     # reached through Amazon Bedrock (app/esg/llm.py).
     "openai>=3.11,<4",
+    # PyPDF2 and pypdf both need it to read AES-encrypted PDFs -- annual reports that open
+    # without a password but lock copying. Without it no page is read and the analysis
+    # fails with "No text extracted from the input file or URL".
+    "pycryptodome>=3.20",
     "pydantic-settings>=2.15.0",
     # The [aws] extra (pymongo-auth-aws + boto3) is what makes authMechanism=MONGODB-AWS
     # work: Atlas authenticates the api container as the IAM user ezrating-atlas-prod
